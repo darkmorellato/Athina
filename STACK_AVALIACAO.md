@@ -46,6 +46,8 @@ stageConfirmation.ts, paymobiHandlers.ts) → ai-request → NVIDIA NIM → resp
 
 **Já tem no projeto:** BullMQ 6.3.11 (filas — usar para follow-ups/retries), Redis (sessão/memória curta).
 
+**Adotado em 08/10/2026:** `ai@7.0.133` + `@ai-sdk/openai-compatible@3.0.66` — `AIService` (painel) e `AgentService.defaultChatCompletion` (agente) migrados para o Vercel AI SDK com provider compartilhado em `backend/src/services/aiProvider.ts`. O loop do agente (tool-calling, guards, takeover) foi mantido intacto; o smoke test com mocks e o teste de precisão com LLM real passaram. Testes: `npx tsx tests/_ai_smoke.ts` (painel) e `npx tsx tests/_agent_precision.ts` (agente, NIM real).
+
 ---
 
 ## 3. Electron vs Tauri (se o painel virar app desktop)

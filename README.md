@@ -93,6 +93,8 @@ O botão **Ouvir** do painel gera o áudio e tenta tocar automaticamente; se o n
 | `npm run dev:tts` | Só servidor TTS (usa venv, port 5050) |
 | `npm run setup:tts` | Cria venv (Python 3.13 via uv) e instala Kokoro 0.6.x |
 | `npm --prefix backend test` | Testes de fumaça do agente autônomo + aprendizado |
+| `npx --prefix backend tsx tests/_agent_precision.ts` | Precisão do agente com LLM real (NIM) — sem WhatsApp |
+| `npx --prefix backend tsx tests/_ai_smoke.ts` | Teste do AIService do painel com a chave do .env |
 | `npm --prefix backend run test:tts` | Teste de integração Node → TTS local |
 | `npm run build` / `npm run typecheck` / `npm run lint` | Build, tipos, lint do frontend |
 | `npm --prefix backend run typecheck` | Tipos do backend |

@@ -15,13 +15,23 @@
  * stays silent for that contact for TAKEOVER_WINDOW_MS, so humans and the agent
  * never talk over each other.
  */
-import axios from 'axios';
+import {
+  generateText,
+  jsonSchema,
+  tool,
+  type JSONSchema7,
+  type ModelMessage,
+  type ToolCallPart,
+  type ToolResultPart,
+  type ToolSet,
+} from 'ai';
 import { LRUCache } from 'lru-cache';
 import config from '../config/index.js';
 import logger from '../utils/logger.js';
 import whatsAppService from './WhatsAppService.js';
 import trainingService from './TrainingService.js';
 import { PaymobiScraperService } from './PaymobiScraperService.js';
+import { getChatModel } from './aiProvider.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -169,6 +179,67 @@ const MEDIA_GUIDANCE =
 const ERROR_FALLBACK =
   'Desculpe, estou com uma dificuldade momentânea para responder. 😅 ' +
   'Um atendente humano vai te ajudar em instantes — pode repetir sua mensagem, por favor?';
+
+// ─── Conversões shape OpenAI ↔ Vercel AI SDK ─────────────────────────────────
+
+/** Parse tolerante dos argumentos da tool (JSON pode vir truncado). */
+function parseToolArgs(raw: string): unknown {
+  try {
+    return JSON.parse(raw || '{}');
+  } catch {
+    return {};
+  }
+}
+
+/** Converte o histórico do loop (shape OpenAI) para mensagens do AI SDK. */
+function toModelMessages(messages: ChatMessage[]): ModelMessage[] {
+  const out: ModelMessage[] = [];
+  for (const m of messages) {
+    if (m.role === 'system' || m.role === 'user') {
+      out.push({ role: m.role, content: m.content ?? '' });
+      continue;
+    }
+    if (m.role === 'assistant') {
+      const parts: Array<{ type: 'text'; text: string } | ToolCallPart> = [];
+      if (m.content) parts.push({ type: 'text', text: m.content });
+      for (const call of m.tool_calls ?? []) {
+        parts.push({
+          type: 'tool-call',
+          toolCallId: call.id,
+          toolName: call.function.name,
+          input: parseToolArgs(call.function.arguments),
+        });
+      }
+      out.push({ role: 'assistant', content: parts.length > 0 ? parts : '' });
+      continue;
+    }
+    // role: 'tool' — resultado enviado de volta ao modelo
+    const resultPart: ToolResultPart = {
+      type: 'tool-result',
+      toolCallId: m.tool_call_id ?? '',
+      toolName: m.name ?? 'consultar_financiamento',
+      output: { type: 'text', value: m.content ?? '' },
+    };
+    out.push({ role: 'tool', content: [resultPart] });
+  }
+  return out;
+}
+
+/** Converte as ferramentas do agente (schema OpenAI) para o ToolSet do AI SDK. */
+function toToolSet(tools: readonly unknown[]): ToolSet {
+  const set: ToolSet = {};
+  for (const entry of tools) {
+    const fn = (
+      entry as { function?: { name?: string; description?: string; parameters?: JSONSchema7 } }
+    ).function;
+    if (!fn?.name) continue;
+    set[fn.name] = tool({
+      description: fn.description ?? '',
+      inputSchema: jsonSchema(fn.parameters ?? { type: 'object', properties: {} }),
+    });
+  }
+  return set;
+}
 
 export class AgentService {
   private deps: AgentDeps;
@@ -490,43 +561,47 @@ export class AgentService {
     messages: ChatMessage[],
     tools: readonly unknown[]
   ): Promise<AssistantMessage> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (config.aiApiKey) {
-      headers.Authorization = `Bearer ${config.aiApiKey}`;
-    }
-
     const maxAttempts = 3;
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const response = await axios.post<{
-          choices: Array<{ message: AssistantMessage }>;
-        }>(
-          `${config.aiBaseUrl}/chat/completions`,
-          {
-            model: config.agentModel,
-            messages,
-            tools,
-            tool_choice: tools.length > 0 ? 'auto' : undefined,
-            // Baixa de propósito: determinismo > criatividade num atendimento —
-            // reduz respostas em 3ª pessoa e o modelo "esquecendo" de chamar a ferramenta.
-            temperature: 0.1,
-            // Tool-calling + modelos de raciocínio precisam de folga: argumentos
-            // truncados viram JSON inválido e queimam passos do loop.
-            max_tokens: 2048,
-          },
-          { headers, timeout: 120_000 }
-        );
+        const result = await generateText({
+          model: getChatModel(config.agentModel),
+          messages: toModelMessages(messages),
+          // v7 bloqueia system-in-messages por padrão; o loop do agente insere
+          // mensagens de sistema no meio da conversa DE PROPÓSITO (lembrete
+          // obrigatório de consultar a ferramenta após CPF/IMEI) — mantém o
+          // comportamento do endpoint OpenAI nativo.
+          allowSystemInMessages: true,
+          ...(tools.length > 0 ? { tools: toToolSet(tools), toolChoice: 'auto' as const } : {}),
+          // Baixa de propósito: determinismo > criatividade num atendimento —
+          // reduz respostas em 3ª pessoa e o modelo "esquecendo" de chamar a ferramenta.
+          temperature: 0.1,
+          // Tool-calling + modelos de raciocínio precisam de folga: argumentos
+          // truncados viram JSON inválido e queimam passos do loop.
+          maxOutputTokens: 2048,
+          // O retry fica por conta do loop abaixo (mesma semântica de antes).
+          maxRetries: 0,
+          abortSignal: AbortSignal.timeout(120_000),
+        });
 
-        const message = response.data?.choices?.[0]?.message;
-        if (!message) {
-          throw new Error('Empty completion response from AI provider');
-        }
-        return message;
+        const toolCalls: ToolCall[] | undefined = result.toolCalls.length
+          ? result.toolCalls.map((call) => ({
+              id: call.toolCallId,
+              type: 'function' as const,
+              function: { name: call.toolName, arguments: JSON.stringify(call.input ?? {}) },
+            }))
+          : undefined;
+
+        return {
+          role: 'assistant',
+          content: result.text || null,
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
+        };
       } catch (err) {
         lastError = err;
-        const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+        const status = (err as { statusCode?: number }).statusCode;
         const retryable =
           status === 429 || status === undefined || (typeof status === 'number' && status >= 500);
         if (!retryable || attempt === maxAttempts) break;
