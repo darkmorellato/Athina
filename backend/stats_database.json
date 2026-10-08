@@ -1,0 +1,15 @@
+{
+  "totalChats": 10,
+  "autoResolved": 8,
+  "humanInterventions": 23,
+  "ocrScans": 0,
+  "ocrValids": 0,
+  "ocrSuspicious": 0,
+  "intentCounts": {
+    "Tempo de liberação Pix": 0,
+    "Tempo de liberação Boleto": 0,
+    "Ajuda com link Pix": 0,
+    "Cadastro Não Encontrado": 0,
+    "Contrato Finalizado": 0
+  }
+}

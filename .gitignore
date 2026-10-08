@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.env
+backend/.env
+backend/.wwebjs_auth/
+backend/.wwebjs_cache/
+backend/dist/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary debug files
+debug/
+*.wav
+backend/.tts_tmp/
+
+# Modelos e ambientes (grandes / gerados — não versionar)
+*.onnx
+backend/voices.bin
+.venv/
+__pycache__/
+*.pyc
+
+# Backups manuais (o git passa a cumprir esse papel)
+.backup/

@@ -1,0 +1,48 @@
+{
+  "name": "agent-athina",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\" \"npm run dev:tts\"",
+    "dev:frontend": "vite",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:tts": "sh -c 'if curl -sf http://127.0.0.1:5050/health >/dev/null 2>&1; then echo \"TTS já ativo em 5050 — reutilizando o servidor existente\"; elif [ -x backend/.venv/bin/python ]; then backend/.venv/bin/python backend/ttsServer.py; else python3 backend/ttsServer.py; fi'",
+    "setup:tts": "sh -c 'if command -v uv >/dev/null 2>&1; then uv venv --python 3.13 backend/.venv && uv pip install --python backend/.venv/bin/python kokoro-onnx soundfile; else python3 -m venv backend/.venv && backend/.venv/bin/pip install kokoro-onnx soundfile; fi'",
+    "build": "vite build",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "clsx": "^2.1.1",
+    "framer-motion": "^14.0.0",
+    "lucide-react": "^1.16.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "socket.io-client": "^4.8.3",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^10.0.5",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "postcss": "^8.5.14",
+    "tailwindcss": "^4.3.3",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vite": "^8.0.12",
+    "vite-plugin-checker": "^0.14.5"
+  }
+}
