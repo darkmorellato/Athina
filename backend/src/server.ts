@@ -16,6 +16,7 @@ import { closeSharedBrowser } from './services/PaymobiScraperService.js';
 import SocketController from './controllers/SocketController.js';
 import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import logger from './utils/logger.js';
+import { initLlmTracing } from './services/llmTracer.js';
 
 process.on('uncaughtException', (error) => {
   logger.error({ error: error instanceof Error ? error.stack : String(error) }, 'Uncaught Exception captured');
@@ -68,6 +69,10 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
 });
 
 const socketController = new SocketController(io);
+
+// Tracing opcional das chamadas de LLM (OTel → Langfuse).
+// No-op absoluto sem LANGFUSE_PUBLIC_KEY/SECRET_KEY no ambiente.
+initLlmTracing();
 
 io.on('connection', (socket) => {
   logger.info({ socketId: socket.id }, 'Socket connected');

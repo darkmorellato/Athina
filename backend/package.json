@@ -26,6 +26,9 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.66",
     "@gradio/client": "^2.2.0",
+    "@lancedb/lancedb": "^0.40.0",
+    "@langfuse/otel": "^5.13.1",
+    "@opentelemetry/sdk-node": "^0.223.0",
     "ai": "^7.0.133",
     "async-mutex": "^0.5.0",
     "axios": "^1.16.1",

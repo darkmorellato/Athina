@@ -84,6 +84,17 @@ Notas: o Chatterbox hosted expõe apenas voz masculina em pt-BR (clonagem zero-s
 
 O botão **Ouvir** do painel gera o áudio e tenta tocar automaticamente; se o navegador bloquear o autoplay, o botão **▶ Tocar** aparece e reproduz no clique.
 
+## 📊 Observabilidade e memória (opcionais)
+
+Ambos são **opt-in** — sem as variáveis no `backend/.env` ficam 100% desligados (zero overhead):
+
+| Recurso | Como ativar | O que faz |
+| --- | --- | --- |
+| Tracing das decisões do LLM (Langfuse) | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | Exporta cada chamada de LLM (prompt/resposta/tokens) via OpenTelemetry — Langfuse Cloud ou self-host (`LANGFUSE_BASEURL`) |
+| Memória semântica (LanceDB) | `AGENT_SEMANTIC_MEMORY=true` | Grava atendimentos (pergunta→resposta) e injeta os mais similares no prompt; embeddings do NIM (`EMBEDDING_MODEL`, padrão `nvidia/nemotron-3-embed-1b`) |
+
+Smokes: `npx --prefix backend tsx tests/_tracing_smoke.ts` (não precisa de conta) e `tests/_semantic_memory_smoke.ts` (usa a chave do NIM).
+
 ## Scripts
 
 | Comando | Descrição |

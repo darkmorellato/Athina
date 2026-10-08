@@ -7,6 +7,7 @@ import { generateText } from 'ai';
 import config from '../config/index.js';
 import logger from '../utils/logger.js';
 import { getChatModel, isCloudProvider } from './aiProvider.js';
+import { llmTelemetry } from './llmTracer.js';
 import type { AIRequest } from '../types/index.js';
 
 // Modelos que aceitam parâmetros de raciocínio (chat_template_kwargs/reasoning_budget).
@@ -38,6 +39,7 @@ class AIService {
       try {
         const result = await generateText({
           model: getChatModel(data.model),
+          telemetry: llmTelemetry('athina-panel-call'),
           // Correção ortográfica: tudo em uma mensagem única (sem system),
           // igual ao comportamento anterior.
           ...(isSpelling

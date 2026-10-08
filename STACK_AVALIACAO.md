@@ -36,8 +36,8 @@ stageConfirmation.ts, paymobiHandlers.ts) → ai-request → NVIDIA NIM → resp
 | **LangGraph** (`@langchain/langgraph`) | **1.4.20** | Máquina de estados em grafo para fluxos complexos (ex.: cobrança com aprovação humana) | Opção se complexidade crescer |
 | **OpenAI Agents SDK** (`@openai/agents`) | **0.19.0** | SDK enxuto multi-provider | Alternativa |
 | **MCP SDK** (`@modelcontextprotocol/sdk`) | **1.32.1** | Padronizar ferramentas (Paymobi, TTS, WhatsApp) como tools reutilizáveis | ⭐ Adotar na Fase 3 |
-| **Langfuse** (`langfuse`) | **3.39.2** | Tracing, custos e qualidade das decisões do LLM | ⭐ Recomendado |
-| **LanceDB** (`@lancedb/lancedb`) | **0.39.0** | Memória vetorial embarcada (zero-ops) | ⭐ Para memória semântica |
+| **Langfuse** (`@langfuse/otel` + `@opentelemetry/sdk-node`) | **5.13.1** ✅ adotado (08/10/2026) | Tracing, custos e qualidade das decisões do LLM | O pacote `langfuse` (v3) está DEPRECADO — integração via OpenTelemetry (`backend/src/services/llmTracer.ts`); ativa só com LANGFUSE_* no .env |
+| **LanceDB** (`@lancedb/lancedb`) | **0.40.0** ✅ adotado (08/10/2026) | Memória vetorial embarcada (zero-ops) | Módulo opt-in (`semanticMemory.ts`, AGENT_SEMANTIC_MEMORY=true); grava/busca atendimentos com embeddings do NIM |
 | Qdrant (`@qdrant/js-client-rest`) | 1.19.0 | Vector DB em escala (servidor) | Se escalar |
 | Chroma (`chromadb`) | 3.5.0 | Vector DB alternativa | Menos indicado p/ prod |
 | **Playwright** (`playwright`) | **1.64.0** ✅ adotado (08/10/2026) | Automação de browser mais confiável que Puppeteer | Migração feita: PIX do scraper + E2E do painel (`npm run test:e2e`); puppeteer segue só como dep. do whatsapp-web.js |
@@ -146,7 +146,7 @@ Conforme o anúncio do TS 7.0 (devblogs.microsoft.com/typescript), o TS 7 não e
 | Fase | Ação | Ferramentas |
 |------|------|-------------|
 | **1** (1–2 sem) | Mover orquestração dos hooks do frontend → **AgentCore no backend**; tool-calling (consultarPaymobi, enviarMensagem, gerarAudio, historicoChat) | `ai@7` + `@ai-sdk/openai-compatible@3` |
-| **2** | Memória (Redis + LanceDB) + tracing de decisões + filas de follow-up | `@lancedb/lancedb`, `langfuse`, BullMQ 6 (já instalado) |
+| **2** | Memória (Redis + LanceDB) + tracing de decisões + filas de follow-up | `@lancedb/lancedb`, `@langfuse/otel`, BullMQ 6 (já instalado) |
 | **3** | Scraping Paymobi resiliente + tools padronizadas | `@browserbasehq/stagehand` ou Playwright; `@modelcontextprotocol/sdk` |
 | **4** (opcional) | Painel desktop (PWA → Tauri) e otimizações Rust (napi-rs) | `@tauri-apps/cli@2`, `@napi-rs/cli@3` |
 

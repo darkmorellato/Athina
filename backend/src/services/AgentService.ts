@@ -32,6 +32,8 @@ import whatsAppService from './WhatsAppService.js';
 import trainingService from './TrainingService.js';
 import { PaymobiScraperService } from './PaymobiScraperService.js';
 import { getChatModel } from './aiProvider.js';
+import { isSemanticMemoryEnabled, searchMemory, addMemory } from './semanticMemory.js';
+import { llmTelemetry } from './llmTracer.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -399,9 +401,20 @@ export class AgentService {
       'falando COM o cliente como quem digita no WhatsApp para ele. ' +
       'Proibido terceira pessoa ("o cliente...", "a ferramenta..."), resumos ou ' +
       'relatórios — envie APENAS a mensagem que será entregue ao cliente.';
-    const systemPrompt = trainingBlock
+    let systemPrompt = trainingBlock
       ? `${SYSTEM_PROMPT}\n\n${trainingBlock}${FORMAT_REMINDER}`
       : `${SYSTEM_PROMPT}${FORMAT_REMINDER}`;
+
+    // Memória semântica (opt-in): enriquece o prompt com atendimentos
+    // semelhantes gravados anteriormente (AGENT_SEMANTIC_MEMORY=true).
+    if (isSemanticMemoryEnabled()) {
+      const memories = await searchMemory(text, 3);
+      if (memories.length > 0) {
+        systemPrompt +=
+          '\n\nMEMÓRIAS DE ATENDIMENTOS SEMELHANTES (referência — podem estar desatualizadas):\n' +
+          memories.map((m) => `- ${m.text}`).join('\n');
+      }
+    }
 
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
@@ -502,6 +515,12 @@ export class AgentService {
 
     await this.deps.sendMessage(contactId, finalText);
     logger.info({ contactId, length: finalText.length }, '[Agent] Auto-reply sent');
+
+    // Memória semântica (opt-in): grava o par pergunta→resposta para
+    // enriquecer atendimentos futuros (fire-and-forget; nunca lança).
+    if (isSemanticMemoryEnabled()) {
+      void addMemory(`${text}\n→ ${finalText}`.slice(0, 1200), 'exchange');
+    }
   }
 
   private async executeTool(call: ToolCall): Promise<string> {
@@ -568,6 +587,7 @@ export class AgentService {
       try {
         const result = await generateText({
           model: getChatModel(config.agentModel),
+          telemetry: llmTelemetry('athina-agent-chat'),
           messages: toModelMessages(messages),
           // v7 bloqueia system-in-messages por padrão; o loop do agente insere
           // mensagens de sistema no meio da conversa DE PROPÓSITO (lembrete
