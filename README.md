@@ -61,13 +61,13 @@ No modo autônomo o agente usa **tool-calling**: consulta o contrato no Paymobi 
 
 ## 🎓 Treinamento de respostas
 
-- Base de conhecimento única: **`backend/learning_database.json`** (regras operacionais + exemplos reais de perguntas e respostas)
+- Base de conhecimento única: **SQLite local** (`backend/data/athina.db`, via `node:sqlite` nativo) — regras operacionais + exemplos reais de perguntas e respostas. O antigo `backend/learning_database.json` é **importado automaticamente na primeira execução** e fica no repo como arquivo-fonte histórico
 - **Aprendizado automático**: quando o operador responde um cliente manualmente no painel, o par *pergunta do cliente → resposta aprovada* entra na base automaticamente (com dedupe e atualização de pares repetidos)
 - O agente autônomo carrega o treinamento **dinamicamente em cada resposta** (regras + exemplos mais recentes, teto de ~8K caracteres), logo edições passam a valer na hora
 - O painel (aba Treinamento) sincroniza: ao conectar recebe a base persistida, e edições do painel são **salvas no servidor** e propagadas para todos os clientes
 - Eventos: `update-training-rules`, `update-training-qas`, `request-training` → resposta `training-data` / `training-data-updated`
 
-Para adicionar conhecimento: edite o JSON (ou use o painel) com novas regras e pares pergunta/resposta — ou simplesmente responda clientes pelo painel e deixe o aprendizado automático trabalhar.
+Para adicionar conhecimento: use o painel (aba Treinamento) com novas regras e pares pergunta/resposta — ou simplesmente responda clientes pelo painel e deixe o aprendizado automático trabalhar.
 
 ## 🔊 Vozes (TTS)
 

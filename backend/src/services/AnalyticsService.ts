@@ -1,9 +1,13 @@
 /**
- * @fileoverview Analytics and statistics service with Redis fallback.
- * Works without Redis using in-memory storage.
- * Security fixes: atomic increments (WATCH/MULTI/EXEC), bounded intents, safe JSON parsing.
+ * @fileoverview Analytics e estatísticas com Redis + espelho DURÁVEL em SQLite.
+ *
+ * Sem Redis (caso atual): o SQLite mantém os contadores entre reinícios —
+ * o antigo fallback só em memória perdia tudo a cada restart.
+ * Com Redis: o Redis continua sendo a fonte primária (TTL de 7 dias).
  */
+import type { DatabaseSync } from 'node:sqlite';
 import redisService from './RedisService.js';
+import { getDb } from './db.js';
 import logger from '../utils/logger.js';
 
 export interface AnalyticsStats {
@@ -62,10 +66,82 @@ function safeParseStats(raw: string): AnalyticsStats {
   }
 }
 
-// In-memory fallback when Redis is unavailable
-let memoryStats: AnalyticsStats = { ...DEFAULT_STATS, intentCounts: {} };
+export class AnalyticsService {
+  private db: DatabaseSync | null;
+  /** Espelho local hidratado do SQLite (durável) + atualizações em tempo real. */
+  private memoryStats: AnalyticsStats;
 
-class AnalyticsService {
+  constructor(db: DatabaseSync | null) {
+    this.db = db;
+    this.memoryStats = this.loadFromDb();
+  }
+
+  private loadFromDb(): AnalyticsStats {
+    const stats: AnalyticsStats = { ...DEFAULT_STATS, intentCounts: {} };
+    try {
+      if (!this.db) return stats;
+      const rows = this.db.prepare('SELECT key, value FROM analytics_stats').all() as Array<{
+        key: string;
+        value: number;
+      }>;
+      for (const row of rows) {
+        if ((NUMERIC_KEYS as string[]).includes(row.key)) {
+          stats[row.key as (typeof NUMERIC_KEYS)[number]] = Number(row.value) || 0;
+        }
+      }
+      const intents = this.db.prepare('SELECT intent, count FROM analytics_intents').all() as Array<{
+        intent: string;
+        count: number;
+      }>;
+      for (const it of intents) stats.intentCounts[it.intent] = Number(it.count) || 0;
+    } catch (err) {
+      logger.warn(
+        { error: err instanceof Error ? err.message : String(err) },
+        'Falha ao carregar analytics do SQLite'
+      );
+    }
+    return stats;
+  }
+
+  private persistValue(key: string, value: number): void {
+    try {
+      this.db
+        ?.prepare(
+          'INSERT INTO analytics_stats (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+        )
+        .run(key, Math.max(0, Math.trunc(value)));
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err), key }, 'Analytics persist failed');
+    }
+  }
+
+  private persistIncrement(key: string, amount: number): void {
+    try {
+      this.db
+        ?.prepare(
+          'INSERT INTO analytics_stats (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = analytics_stats.value + excluded.value'
+        )
+        .run(key, Math.trunc(amount));
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err), key }, 'Analytics persist failed');
+    }
+  }
+
+  private persistIntentIncrement(intent: string): void {
+    try {
+      this.db
+        ?.prepare(
+          'INSERT INTO analytics_intents (intent, count) VALUES (?, 1) ON CONFLICT(intent) DO UPDATE SET count = count + 1'
+        )
+        .run(intent);
+    } catch (err) {
+      logger.warn(
+        { error: err instanceof Error ? err.message : String(err), intent },
+        'Analytics intent persist failed'
+      );
+    }
+  }
+
   /**
    * Get current analytics stats.
    */
@@ -76,7 +152,7 @@ class AnalyticsService {
         if (!raw) return { ...DEFAULT_STATS };
         return safeParseStats(raw);
       },
-      { ...memoryStats, intentCounts: { ...memoryStats.intentCounts } } // Fallback to memory
+      { ...this.memoryStats, intentCounts: { ...this.memoryStats.intentCounts } } // Fallback durável (SQLite)
     );
   }
 
@@ -85,15 +161,23 @@ class AnalyticsService {
    * Security fix: atomic read-modify-write using WATCH/MULTI/EXEC with retries.
    */
   async updateStats(updates: Partial<AnalyticsStats>): Promise<void> {
-    // Always update memory fallback
-    memoryStats = {
-      ...memoryStats,
+    // Always update durable mirror
+    this.memoryStats = {
+      ...this.memoryStats,
       ...updates,
       intentCounts: {
-        ...memoryStats.intentCounts,
+        ...this.memoryStats.intentCounts,
         ...(updates.intentCounts ?? {}),
       },
     };
+
+    for (const key of NUMERIC_KEYS) {
+      const val = updates[key];
+      if (typeof val === 'number') this.persistValue(key, val);
+    }
+    if (updates.intentCounts) {
+      this.persistIntentsAbsolute(updates.intentCounts);
+    }
 
     await this.atomicUpdate((current) => {
       const newStats: AnalyticsStats = {
@@ -108,13 +192,27 @@ class AnalyticsService {
     });
   }
 
+  private persistIntentsAbsolute(intentCounts: Record<string, number>): void {
+    try {
+      const upsert = this.db?.prepare(
+        'INSERT INTO analytics_intents (intent, count) VALUES (?, ?) ON CONFLICT(intent) DO UPDATE SET count = excluded.count'
+      );
+      if (!upsert) return;
+      for (const [intent, count] of Object.entries(intentCounts)) {
+        upsert.run(intent.slice(0, 100), Math.max(0, Math.trunc(count)));
+      }
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'Analytics intents persist failed');
+    }
+  }
+
   /**
    * Increment a specific stat counter.
-   * Security fix: atomic via WATCH/MULTI/EXEC.
+   * Security fix: atomic via WATCH/MULTI/EXEC (Redis) + espelho SQLite.
    */
   async increment(stat: keyof Omit<AnalyticsStats, 'intentCounts'>, amount = 1): Promise<void> {
-    // Update memory
-    memoryStats[stat] = (memoryStats[stat] as number) + amount;
+    this.memoryStats[stat] = (this.memoryStats[stat] as number) + amount;
+    this.persistIncrement(stat, amount);
 
     await this.atomicUpdate((current) => {
       const next = { ...current };
@@ -130,12 +228,12 @@ class AnalyticsService {
   async trackIntent(intent: string): Promise<void> {
     const key = intent.slice(0, 100);
 
-    // Update memory with intent limit
     if (
-      memoryStats.intentCounts[key] !== undefined ||
-      Object.keys(memoryStats.intentCounts).length < MAX_TRACKED_INTENTS
+      this.memoryStats.intentCounts[key] !== undefined ||
+      Object.keys(this.memoryStats.intentCounts).length < MAX_TRACKED_INTENTS
     ) {
-      memoryStats.intentCounts[key] = (memoryStats.intentCounts[key] || 0) + 1;
+      this.memoryStats.intentCounts[key] = (this.memoryStats.intentCounts[key] || 0) + 1;
+      this.persistIntentIncrement(key);
     }
 
     await this.atomicUpdate((current) => {
@@ -151,10 +249,16 @@ class AnalyticsService {
   }
 
   /**
-   * Reset all stats.
+   * Reset all stats (memory + SQLite + Redis).
    */
   async resetStats(): Promise<void> {
-    memoryStats = { ...DEFAULT_STATS, intentCounts: {} };
+    this.memoryStats = { ...DEFAULT_STATS, intentCounts: {} };
+    try {
+      this.db?.prepare('DELETE FROM analytics_stats').run();
+      this.db?.prepare('DELETE FROM analytics_intents').run();
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'Analytics reset persist failed');
+    }
 
     await redisService.safeExecute(
       async () => {
@@ -167,7 +271,7 @@ class AnalyticsService {
 
   /**
    * Atomic read-modify-write against Redis with optimistic locking.
-   * Falls back silently when Redis is unavailable (memory already updated).
+   * Falls back silently when Redis is unavailable (durable mirror already updated).
    */
   private async atomicUpdate(transform: (current: AnalyticsStats) => AnalyticsStats): Promise<void> {
     await redisService.safeExecute(
@@ -205,4 +309,4 @@ class AnalyticsService {
   }
 }
 
-export default new AnalyticsService();
+export default new AnalyticsService(getDb());

@@ -42,3 +42,6 @@ __pycache__/
 
 # Backups manuais (o git passa a cumprir esse papel)
 .backup/
+
+# SQLite local (banco em runtime)
+backend/data/

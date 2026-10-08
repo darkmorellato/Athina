@@ -9,12 +9,8 @@
  * Uso: npm --prefix backend test  (ou: npx tsx tests/agent.smoke.ts)
  */
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { AgentService } from '../src/services/AgentService.js';
 import config from '../src/config/index.js';
-import trainingService from '../src/services/TrainingService.js';
 
 // O agente só responde com AGENT_AUTOREPLY=true — força para o teste.
 const mutableConfig = config as unknown as { agentAutoReply: boolean };
@@ -278,39 +274,35 @@ const scenarios: Scenario[] = [
   {
     name: 'aprendizado automático: resposta humana vira exemplo na base',
     run: async () => {
-      const dbPath = path.resolve(
-        path.dirname(fileURLToPath(import.meta.url)),
-        '../learning_database.json'
+      // Banco SQLite ISOLADO em memória — não toca a base real de produção.
+      const { openDatabase } = await import('../src/services/db.js');
+      const { TrainingService } = await import('../src/services/TrainingService.js');
+      const svc = new TrainingService(openDatabase(':memory:'));
+
+      const before = svc.getPromptBlock();
+      svc.learnFromExchange(
+        'Vocês abrem no sábado de manhã?',
+        'Sim! Nossas lojas abrem aos sábados das 8h às 12h. 😊'
       );
-      const backup = fs.readFileSync(dbPath, 'utf-8');
-      try {
-        const before = trainingService.getPromptBlock();
-        trainingService.learnFromExchange(
-          'Vocês abrem no sábado de manhã?',
-          'Sim! Nossas lojas abrem aos sábados das 8h às 12h. 😊'
-        );
-        const after = trainingService.getPromptBlock();
-        assert.ok(
-          !before.includes('abrem no sábado') && after.includes('abrem no sábado'),
-          'o novo par pergunta/resposta deveria entrar no bloco de prompt'
-        );
-        assert.ok(after.includes('8h às 12h'), 'a resposta aprovada deve ser preservada');
+      const after = svc.getPromptBlock();
+      assert.ok(
+        !before.includes('abrem no sábado') && after.includes('abrem no sábado'),
+        'o novo par pergunta/resposta deveria entrar no bloco de prompt'
+      );
+      assert.ok(after.includes('8h às 12h'), 'a resposta aprovada deve ser preservada');
 
-        // Pergunta repetida atualiza o par em vez de duplicar.
-        trainingService.learnFromExchange(
-          'vocês abrem no sabado de manha?',
-          'Atualização: agora abrimos das 9h às 13h.'
-        );
-        const updated = trainingService.getPromptBlock();
-        assert.ok(updated.includes('9h às 13h'), 'par duplicado deve ser atualizado');
-        assert.ok(!updated.includes('8h às 12h'), 'resposta antiga deve ser substituída');
+      // Pergunta repetida atualiza o par em vez de duplicar.
+      svc.learnFromExchange(
+        'vocês abrem no sabado de manha?',
+        'Atualização: agora abrimos das 9h às 13h.'
+      );
+      const updated = svc.getPromptBlock();
+      assert.ok(updated.includes('9h às 13h'), 'par duplicado deve ser atualizado');
+      assert.ok(!updated.includes('8h às 12h'), 'resposta antiga deve ser substituída');
 
-        // Entradas fora da faixa são ignoradas.
-        trainingService.learnFromExchange('oi', 'oi');
-        assert.ok(!updated.includes('\nP: oi\n'), 'par curto demais deve ser ignorado');
-      } finally {
-        fs.writeFileSync(dbPath, backup, 'utf-8'); // restaura a base real
-      }
+      // Entradas fora da faixa são ignoradas.
+      svc.learnFromExchange('oi', 'oi');
+      assert.ok(!updated.includes('\nP: oi\n'), 'par curto demais deve ser ignorado');
     },
   },
 ];
