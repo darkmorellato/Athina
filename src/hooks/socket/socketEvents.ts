@@ -3,6 +3,7 @@
  * Handles all real-time communication with the backend.
  */
 import type { Socket } from 'socket.io-client';
+import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import type { Message, WAMessage, AgentLog } from '../../types/index.js';
 import type { AnalyticsStats } from '../../types/index.js';
 import { createSocketHandlers } from './socketHandlers.js';
@@ -34,11 +35,11 @@ export interface SocketEventHandlers {
   isAgentActiveRef: React.MutableRefObject<boolean>;
   serverAutoReplyRef: React.MutableRefObject<boolean>;
   messagesRef: React.MutableRefObject<Message[]>;
-  socket: Socket;
+  socket: Socket<ServerToClientEvents, ClientToServerEvents>;
 }
 
 export function setupSocketEvents(
-  socket: Socket,
+  socket: Socket<ServerToClientEvents, ClientToServerEvents>,
   handlers: SocketEventHandlers
 ): () => void {
   socket.emit('request-status');

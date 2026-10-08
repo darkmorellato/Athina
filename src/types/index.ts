@@ -2,36 +2,16 @@
  * @fileoverview Shared types for the frontend application.
  */
 
-// Log Types
-export interface AgentLog {
-  id: string;
-  type: 'info' | 'success' | 'process' | 'error';
-  text: string;
-  time: string;
-}
-
-// Message Types
-export interface Message {
-  id: string;
-  text: string;
-  sender: 'customer' | 'agent';
-  fromId: string;
-  fromName?: string;
-  time: string;
-  /** Unix timestamp (seconds) — usado para ordenação e separadores de data */
-  timestamp?: number;
-  ocrStatus?: 'safe' | 'suspicious' | 'fraud';
-  ocrLabel?: string;
-  ocrReason?: string;
-  ocrValue?: string;
-  ocrDate?: string;
-  mediaMimeType?: string;
-  mediaData?: string;
-  /** id SERIALIZADO no formato do WhatsApp (necessário para citar/responder) */
-  serializedId?: string;
-  /** Mensagem citada (reply) quando esta mensagem é uma resposta */
-  quoted?: { body: string; fromMe: boolean };
-}
+// ─── Tipos compartilhados com o backend (fonte única: shared/contracts.ts) ───
+// NÃO redeclare estes tipos aqui: edite shared/contracts.ts.
+export type {
+  AgentLog,
+  AnalyticsStats,
+  ChatMessage as Message,
+  QAExample,
+  TrainingData,
+  WAMessage,
+} from '@shared/contracts.js';
 
 // Contact Types
 export interface Contact {
@@ -45,52 +25,11 @@ export interface Contact {
   sectorKey: string;
 }
 
-// Training Types
-export interface QAExample {
-  intent: string;
-  question: string;
-  answer: string;
-}
-
-export interface TrainingData {
-  customRules: string[];
-  qaExamples: QAExample[];
-}
-
-// Analytics Types
-export interface AnalyticsStats {
-  totalChats: number;
-  autoResolved: number;
-  humanInterventions: number;
-  ocrScans: number;
-  ocrValids: number;
-  ocrSuspicious: number;
-  intentCounts: Record<string, number>;
-}
-
 // AI Response Types
 export interface AIResponse {
   text: string;
   contactId: string;
   isSentDirectly?: boolean;
-}
-
-// WhatsApp Message (from backend)
-export interface WAMessage {
-  id?: string;
-  from: string;
-  name?: string;
-  number?: string;
-  body: string;
-  sender?: 'customer' | 'agent';
-  mediaMimeType?: string;
-  mediaData?: string;
-  /** Unix timestamp em SEGUNDOS — usado pelo painel para ordenar a conversa */
-  timestamp?: number;
-  /** id SERIALIZADO no formato do WhatsApp (req para citar/responder) */
-  serializedId?: string;
-  /** Mensagem citada (reply) quando esta mensagem é uma resposta */
-  quoted?: { body: string; fromMe: boolean };
 }
 
 /** Alvo de um reply (mensagem sendo respondida no compositor) */

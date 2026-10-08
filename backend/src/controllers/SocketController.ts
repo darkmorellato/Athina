@@ -5,7 +5,6 @@
 import pkg from 'whatsapp-web.js';
 const { MessageMedia } = pkg;
 
-import { z } from 'zod';
 import whatsAppService from '../services/WhatsAppService.js';
 import aiService from '../services/AIService.js';
 import chatStateService from '../services/ChatStateService.js';
@@ -18,84 +17,36 @@ import { handleRequestChatHistory } from '../services/helpers/whatsappChatHelper
 import { resolveAvatars } from '../services/helpers/whatsappAvatarHelper.js';
 import config from '../config/index.js';
 import logger from '../utils/logger.js';
-import type { AIRequest, PaymobiSearchParams } from '../types/index.js';
+import {
+  aiRequestSchema,
+  avatarsSchema,
+  chatHistorySchema,
+  contactIdSchema,
+  paymobiConsultSchema,
+  sendImageReplySchema,
+  sendReplySchema,
+  spellingSchema,
+  ttsRequestSchema,
+  updateChatStateSchema,
+  voiceReplySchema,
+} from '@shared/contracts.js';
+import type {
+  AIRequestPayload,
+  ChatHistoryRequestPayload,
+  ClientToServerEvents,
+  PaymobiConsultPayload,
+  SendImageReplyPayload,
+  SendReplyPayload,
+  ServerToClientEvents,
+  SpellingRequestPayload,
+  TtsRequestPayload,
+  VoiceReplyPayload,
+} from '@shared/contracts.js';
 import type { Server, Socket } from 'socket.io';
 
-// ─── Input Validation Schemas (Zod) ──────────────────────────────────────────
-const aiRequestSchema = z.object({
-  model: z.string().min(1).max(200),
-  persona: z.string().max(8000),
-  message: z.string().min(1).max(10000),
-  contactId: z.string().min(1).max(200),
-});
-
-const sendReplySchema = z.object({
-  to: z.string().min(1).max(100),
-  text: z.string().min(1).max(10000),
-  isManual: z.boolean().optional(),
-  /** id serializado da mensagem citada (reply/quote do WhatsApp) */
-  quotedMessageId: z.string().min(1).max(300).optional(),
-});
-
-const voiceReplySchema = z.object({
-  to: z.string().min(1).max(100),
-  base64: z.string().min(1).max(20_000_000),
-});
-
-const ttsRequestSchema = z.object({
-  text: z.string().min(1).max(10000),
-  voice: z.string().max(100).optional(),
-});
-
-const spellingSchema = z.object({
-  text: z.string().min(1).max(10000),
-  model: z.string().max(200).optional(),
-});
-
-const chatHistorySchema = z.object({
-  chatId: z.string().min(1).max(200),
-  limit: z.number().int().min(1).max(120).optional(),
-});
-
-const contactIdSchema = z.object({
-  contactId: z.string().min(1).max(200),
-});
-
-const sendImageReplySchema = z.object({
-  to: z.string().min(1).max(100),
-  // base64 de ~15MB binário cabe no maxHttpBufferSize (25MB) com folga
-  base64: z.string().min(1).max(20_000_000),
-  mimetype: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
-  caption: z.string().max(1024).optional(),
-});
-
-const avatarsSchema = z.object({
-  jids: z.array(z.string().min(3).max(200)).min(1).max(60),
-});
-
-const updateChatStateSchema = z.object({
-  contactId: z.string().min(1).max(200),
-  state: z.object({
-    stage: z.enum(['COLLECTING', 'WAITING_CONFIRMATION']),
-    // pendingData é o contrato retornado pelo Paymobi (validado por fora)
-    pendingData: z.any().optional(),
-    // collect = dados parciais da coleta (nome/CPF-IMEI) por contato
-    collect: z
-      .object({
-        name: z.string().max(120).optional(),
-        doc: z.string().max(30).optional(),
-      })
-      .nullable()
-      .optional(),
-  }),
-});
-
-const paymobiSchema = z.object({
-  query: z.string().min(1).max(50),
-  clientName: z.string().max(200).optional(),
-  searchType: z.enum(['imei', 'cpf', 'name']).optional(),
-  contactId: z.string().max(200).optional(),
-});
+// Socket.IO tipado com os contratos compartilhados (shared/contracts.ts)
+type AthinaServer = Server<ClientToServerEvents, ServerToClientEvents>;
+type AthinaSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 
 // ─── Rate Limiter ────────────────────────────────────────────────────────────
 class RateLimiter {
@@ -163,9 +114,10 @@ rateLimiterCleanupInterval.unref();
 
 // ─── Safe Emit Helper ────────────────────────────────────────────────────────
 /** Safely emit a socket event with error handling. */
-function safeEmit(socket: Socket, event: string, data?: unknown): void {
+function safeEmit(socket: AthinaSocket, event: keyof ServerToClientEvents, data?: unknown): void {
   try {
-    socket.emit(event, data);
+    // cast: emit dinâmico por chave não é expressável no mapa tipado
+    (socket.emit as (event: string, data?: unknown) => void)(event, data);
   } catch (err) {
     logger.error({ event, socketId: socket.id, error: err instanceof Error ? err.message : String(err) }, 'Socket emit failed');
   }
@@ -174,13 +126,13 @@ function safeEmit(socket: Socket, event: string, data?: unknown): void {
 // ─── SocketController ────────────────────────────────────────────────────────
 class SocketController {
   private isAudioModeActive = false;
-  private io: Server;
+  private io: AthinaServer;
 
-  constructor(io: Server) {
+  constructor(io: AthinaServer) {
     this.io = io;
   }
 
-  registerSocket(socket: Socket): void {
+  registerSocket(socket: AthinaSocket): void {
     safeEmit(socket, 'server-status', whatsAppService.getClientState());
     // Tell the panel whether the autonomous server-side agent is answering customers
     safeEmit(socket, 'agent-mode', { serverAutoReply: config.agentAutoReply });
@@ -270,12 +222,12 @@ class SocketController {
         safeEmit(socket, 'paymobi-error', { message: 'Rate limit exceeded. Please wait.' });
         return;
       }
-      const parsed = paymobiSchema.safeParse(data);
+      const parsed = paymobiConsultSchema.safeParse(data);
       if (!parsed.success) {
         safeEmit(socket, 'paymobi-error', { message: 'Invalid search parameters.' });
         return;
       }
-      this.handleConsultPaymobi(socket, parsed.data as PaymobiSearchParams).catch((err) => {
+      this.handleConsultPaymobi(socket, parsed.data).catch((err) => {
         logger.error({ error: err instanceof Error ? err.message : String(err), socketId: socket.id }, 'Unhandled paymobi error');
         safeEmit(socket, 'paymobi-error', { message: 'Internal error.' });
       });
@@ -447,7 +399,7 @@ class SocketController {
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
 
-  private async handleRequestStatus(socket: Socket): Promise<void> {
+  private async handleRequestStatus(socket: AthinaSocket): Promise<void> {
     const status = whatsAppService.getConnectionStatus();
     safeEmit(socket, 'server-status', status.state);
 
@@ -468,7 +420,7 @@ class SocketController {
     }
   }
 
-  private async handleAIRequest(socket: Socket, data: AIRequest): Promise<void> {
+  private async handleAIRequest(socket: AthinaSocket, data: AIRequestPayload): Promise<void> {
     try {
       const reply = await aiService.call(data);
       safeEmit(socket, 'ai-response', { text: reply, contactId: data.contactId });
@@ -479,8 +431,8 @@ class SocketController {
   }
 
   private async handleSendReply(
-    _socket: Socket,
-    data: { to: string; text: string; isManual?: boolean; quotedMessageId?: string }
+    _socket: AthinaSocket,
+    data: SendReplyPayload
   ): Promise<void> {
     try {
       // O painel assumiu a conversa: pausa o agente autônomo para este contato
@@ -527,8 +479,8 @@ class SocketController {
   }
 
   private async handleGenerateTTSAudio(
-    socket: Socket,
-    data: { text: string; voice?: string }
+    socket: AthinaSocket,
+    data: TtsRequestPayload
   ): Promise<void> {
     try {
       const base64 = await generateTTS(data.text, data.voice);
@@ -540,8 +492,8 @@ class SocketController {
   }
 
   private async handleCorrectSpelling(
-    socket: Socket,
-    data: { text: string; model?: string }
+    socket: AthinaSocket,
+    data: SpellingRequestPayload
   ): Promise<void> {
     try {
       const systemInstruction = 'Você é o revisor ortográfico e sintático oficial da inteligência artificial Athina. Sua única e exclusiva tarefa é revisar o texto digitado pelo operador para que ele seja ideal para síntese de voz (TTS) em português brasileiro. Siga rigidamente as seguintes diretrizes: 1. Adicione acentuação correta a todas as palavras. 2. Insira pontuação natural e fluida. 3. Corrija a ortografia sem formalizar excessivamente o texto. 4. Responda APENAS com o texto corrigido pronto para fala. Nunca adicione explicações.';
@@ -558,12 +510,7 @@ class SocketController {
   }
 
   /** Envia imagem (MessageMedia) com legenda opcional para o chat. */
-  private async handleSendImageReply(data: {
-    to: string;
-    base64: string;
-    mimetype: string;
-    caption?: string;
-  }): Promise<void> {
+  private async handleSendImageReply(data: SendImageReplyPayload): Promise<void> {
     try {
       const client = whatsAppService.getClient();
       if (!client || whatsAppService.getClientState() !== 'READY') {
@@ -580,8 +527,8 @@ class SocketController {
   }
 
   private async handleSendVoiceReply(
-    _socket: Socket,
-    data: { to: string; base64: string }
+    _socket: AthinaSocket,
+    data: VoiceReplyPayload
   ): Promise<void> {
     try {
       const client = whatsAppService.getClient();
@@ -597,7 +544,7 @@ class SocketController {
     }
   }
 
-  private async handleRestartWhatsApp(socket: Socket): Promise<void> {
+  private async handleRestartWhatsApp(socket: AthinaSocket): Promise<void> {
     // Security fix: Deny by default - admin secret MUST be configured
     if (!config.adminSecret) {
       logger.error('[SocketController] restart-whatsapp denied: ADMIN_SECRET not configured on server');
@@ -624,8 +571,8 @@ class SocketController {
   }
 
   private async handleConsultPaymobi(
-    socket: Socket,
-    data: PaymobiSearchParams
+    socket: AthinaSocket,
+    data: PaymobiConsultPayload
   ): Promise<void> {
     const email = config.paymobiEmail;
     const password = config.paymobiPassword;
@@ -649,7 +596,7 @@ class SocketController {
   }
 
   /** Resolve fotos de perfil (com cache no helper) e devolve no socket. */
-  private async handleGetAvatars(socket: Socket, jids: string[]): Promise<void> {
+  private async handleGetAvatars(socket: AthinaSocket, jids: string[]): Promise<void> {
     const client = whatsAppService.getClient();
     const ready = whatsAppService.getClientState() === 'READY';
     const avatars = ready && client ? await resolveAvatars(client, jids) : {};
@@ -657,8 +604,8 @@ class SocketController {
   }
 
   private async handleRequestChatHistory(
-    socket: Socket,
-    data: { chatId: string; limit?: number }
+    socket: AthinaSocket,
+    data: ChatHistoryRequestPayload
   ): Promise<void> {
     const client = whatsAppService.getClient();
     await handleRequestChatHistory(

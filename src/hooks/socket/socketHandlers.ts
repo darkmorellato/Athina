@@ -1,4 +1,5 @@
 import type { Socket } from 'socket.io-client';
+import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import type { Message, WAMessage } from '../../types/index.js';
 import type { SocketEventHandlers } from './socketEvents.js';
 import {
@@ -43,7 +44,7 @@ function trackProcessedId(id: string): void {
 }
 
 export function createSocketHandlers(
-  socket: Socket,
+  socket: Socket<ServerToClientEvents, ClientToServerEvents>,
   handlers: SocketEventHandlers
 ) {
   const {
@@ -209,7 +210,7 @@ export function createSocketHandlers(
     addLog(`Resposta enviada para ${data.contactId.split('@')[0]}`, 'success');
   };
 
-  const onPaymobiResult = (data: { result: any; contactId: string }): void => {
+  const onPaymobiResult = (data: { result: any; contactId?: string }): void => {
     const paymobiCtx = {
       socket,
       setMessages,

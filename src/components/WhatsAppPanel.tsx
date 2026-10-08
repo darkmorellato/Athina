@@ -10,6 +10,7 @@ import { SidebarHeader } from './WhatsAppPanel/SidebarHeader.tsx';
 import { classifyContact, isHostile } from './WhatsAppPanel/panelHelpers.js';
 import { TabBtn } from './WhatsAppPanel/TabBtn.js';
 import type { Message, ReplyTarget, TrainingData } from '../types/index.js';
+import type { SendImageReplyPayload } from '@shared/contracts.js';
 // Note: SectorFilterBar is available but currently not used in the UI
 
 type ActiveTab = 'chats' | 'training' | 'analytics';
@@ -39,7 +40,7 @@ interface WhatsAppPanelProps {
   avatars: Record<string, string | null>;
   requestAvatars: (jids: string[]) => void;
   /** Envia imagem (colada/arrastada) como resposta no WhatsApp */
-  sendImage: (to: string, base64: string, mimetype: string, caption: string) => void;
+  sendImage: (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption: string) => void;
 }
 
 export default function WhatsAppPanel({

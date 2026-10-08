@@ -14,6 +14,7 @@ import chatStateService from './services/ChatStateService.js';
 import redisService from './services/RedisService.js';
 import { closeSharedBrowser } from './services/PaymobiScraperService.js';
 import SocketController from './controllers/SocketController.js';
+import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import logger from './utils/logger.js';
 
 process.on('uncaughtException', (error) => {
@@ -50,7 +51,7 @@ if (!allowedOrigin && !config.isDev) {
   logger.warn('⚠️  ALLOWED_ORIGIN not set in production — CORS will deny all cross-origin requests.');
 }
 
-const io = new Server(server, {
+const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
   cors: {
     origin: allowedOrigin || false,
     methods: ['GET', 'POST'],

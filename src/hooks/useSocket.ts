@@ -7,13 +7,16 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
+import type { ClientToServerEvents, SendImageReplyPayload, ServerToClientEvents } from '@shared/contracts.js';
 import {
-  AgentLog,
-  AnalyticsStats,
   DEFAULT_PERSONA,
   DEFAULT_QUICK_REPLIES,
   DEFAULT_QA_EXAMPLES,
   DEFAULT_CUSTOM_RULES,
+} from '../types/index.js';
+import type {
+  AgentLog,
+  AnalyticsStats,
   Message,
   ServerStatus,
   TrainingData,
@@ -31,7 +34,7 @@ const getAdminToken = (): string | undefined => {
   }
 };
 
-const socket: Socket = io(
+const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(
   import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001',
   {
     auth: getAdminToken() ? { token: getAdminToken() } : undefined,
@@ -243,7 +246,7 @@ export default function useSocket() {
 
   /** Envia imagem colada/arrastada como mensagem de WhatsApp (com legenda). */
   const sendImage = useCallback(
-    (to: string, base64: string, mimetype: string, caption = '') => {
+    (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption = '') => {
       socket.emit('send-image-reply', {
         to,
         base64,

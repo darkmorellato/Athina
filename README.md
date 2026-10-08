@@ -100,6 +100,7 @@ O botão **Ouvir** do painel gera o áudio e tenta tocar automaticamente; se o n
 
 ## Documentação
 
+- [`shared/contracts.ts`](shared/contracts.ts) — contratos Socket.IO compartilhados painel↔backend (fonte única de eventos e payloads; alias `@shared` nos dois lados)
 - [`MODELOS_IA.md`](MODELOS_IA.md) — escolha de TTS (Kokoro) e LLMs open-source (Qwen3), como configurar, checklist de operação
 - [`STACK_AVALIACAO.md`](STACK_AVALIACAO.md) — frameworks (Electron/Tauri/Rust), atualizações e roadmap de autonomia
 - [`PLANO_MELHORIAS_PRODUCAO.md`](PLANO_MELHORIAS_PRODUCAO.md) — correções de segurança/confiabilidade para produção

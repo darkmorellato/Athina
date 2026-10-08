@@ -16,10 +16,11 @@ export function buildConfirmationText(data: { client: any; parcela: any }): stri
 
 export function handlePaymobiResult(
   ctx: PaymobiHandlerContext,
-  data: { result: any; contactId: string }
+  data: { result: any; contactId?: string }
 ): void {
   const { setMessages, socket, addLog, setIsAgentTyping } = ctx;
-  const { result, contactId } = data;
+  const { result } = data;
+  const contactId = data.contactId ?? '';
   const contactName = contactId.split('@')[0];
 
   // Resultado novo → derruba respostas pendentes antigas do contato

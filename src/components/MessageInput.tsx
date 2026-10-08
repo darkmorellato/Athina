@@ -6,11 +6,15 @@
 import { useRef, useState } from 'react';
 import { Plus, Smile, X } from 'lucide-react';
 import type { ReplyTarget } from '../types/index.js';
+import type { SendImageReplyPayload } from '@shared/contracts.js';
 import { SendIcon } from './chat/icons.js';
+
+/** MIME permitido no envio de imagem (fonte única: shared/contracts.ts) */
+type ImageMime = SendImageReplyPayload['mimetype'];
 
 interface PendingImage {
   base64: string; // sem o prefixo data:
-  mimetype: string;
+  mimetype: ImageMime;
   previewUrl: string; // data URL para o <img>
   size: number;
 }
@@ -20,7 +24,7 @@ interface MessageInputProps {
   onChange: (value: string) => void;
   onSend: () => void;
   /** Envia imagem (colada/arrastada/escolhida) como mensagem com legenda opcional */
-  onSendImage?: (base64: string, mimetype: string, caption: string) => void;
+  onSendImage?: (base64: string, mimetype: ImageMime, caption: string) => void;
   /** Mensagem que está sendo respondida (reply/quote) */
   replyTo?: ReplyTarget | null;
   /** Cancela o reply em andamento */
@@ -28,7 +32,9 @@ interface MessageInputProps {
 }
 
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // ~15MB (WhatsApp limita ~16MB)
-const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const ALLOWED_TYPES: readonly ImageMime[] = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const isAllowedImageType = (t: string): t is ImageMime =>
+  (ALLOWED_TYPES as readonly string[]).includes(t);
 const EMOJIS = [
   '😀', '😂', '🥰', '😎', '🤔', '👍', '🙏', '❤️',
   '🔥', '🎉', '✅', '😅', '😍', '😢', '🤝', '💚',
@@ -52,7 +58,7 @@ export function MessageInput({
   const loadFile = (file: File | null | undefined): void => {
     setError(null);
     if (!file) return;
-    if (!ALLOWED_TYPES.includes(file.type)) {
+    if (!isAllowedImageType(file.type)) {
       setError('Só imagens (JPG, PNG, WEBP ou GIF).');
       return;
     }
@@ -60,11 +66,11 @@ export function MessageInput({
       setError(`Imagem muito grande (máx. ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)}MB).`);
       return;
     }
+    const mime = file.type; // já estreitado pelo type guard (ImageMime)
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = String(reader.result ?? '');
-      const [meta, base64] = dataUrl.split(',');
-      const mime = meta.replace('data:', '').replace(';base64', '');
+      const [, base64] = dataUrl.split(',');
       setPending({ base64, mimetype: mime, previewUrl: dataUrl, size: file.size });
     };
     reader.onerror = () => setError('Não consegui ler a imagem.');

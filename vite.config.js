@@ -19,7 +19,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': '/src',
-      '@shared': '/src/shared',
+      '@shared': '/shared',
     },
   },
 })
