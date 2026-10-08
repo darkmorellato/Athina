@@ -22,4 +22,10 @@ export default defineConfig({
       '@shared': '/shared',
     },
   },
+  // Testes de componente (Vitest + Testing Library)
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
 })
