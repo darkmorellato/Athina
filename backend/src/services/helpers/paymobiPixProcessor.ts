@@ -2,7 +2,7 @@
 /**
  * @fileoverview PIX extraction and processing from boleto URLs.
  */
-import type { Page, Browser } from 'puppeteer';
+import type { Browser, Page } from 'playwright';
 import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
@@ -86,7 +86,7 @@ export async function processPixPayment(
   let pixCopiaCola: string | null = null;
 
   const payPage = await browser.newPage();
-  await payPage.setViewport({ width: 800, height: 1200 });
+  await payPage.setViewportSize({ width: 800, height: 1200 });
 
   try {
     try {
@@ -95,9 +95,14 @@ export async function processPixPayment(
         '[PaymobiScraperService] Opening PIX payment page'
       );
       await payPage.goto(finalPixUrl, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: 45000,
       });
+      // Equivalente ao antigo networkidle2 (best-effort — a página de
+      // pagamento pode manter conexões abertas e nunca "ficar ociosa").
+      await payPage
+        .waitForLoadState('networkidle', { timeout: 15000 })
+        .catch(() => undefined);
 
       await new Promise((res) => setTimeout(res, 3000));
       pixCopiaCola = await extractPixCode(payPage);
@@ -138,7 +143,7 @@ export async function processPixPayment(
     } catch (closeErr) {
       logger.warn(
         { error: closeErr instanceof Error ? closeErr.message : String(closeErr) },
-        'Failed to close Puppeteer payPage'
+        'Failed to close PIX payPage'
       );
     }
   }

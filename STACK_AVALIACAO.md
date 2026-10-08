@@ -40,7 +40,7 @@ stageConfirmation.ts, paymobiHandlers.ts) → ai-request → NVIDIA NIM → resp
 | **LanceDB** (`@lancedb/lancedb`) | **0.39.0** | Memória vetorial embarcada (zero-ops) | ⭐ Para memória semântica |
 | Qdrant (`@qdrant/js-client-rest`) | 1.19.0 | Vector DB em escala (servidor) | Se escalar |
 | Chroma (`chromadb`) | 3.5.0 | Vector DB alternativa | Menos indicado p/ prod |
-| **Playwright** (`playwright`) | **1.63.0** | Automação de browser mais confiável que Puppeteer | Avaliar migração |
+| **Playwright** (`playwright`) | **1.64.0** ✅ adotado (08/10/2026) | Automação de browser mais confiável que Puppeteer | Migração feita: PIX do scraper + E2E do painel (`npm run test:e2e`); puppeteer segue só como dep. do whatsapp-web.js |
 | **Stagehand** (`@browserbasehq/stagehand`) | **4.1.0** | Automação de browser guiada por IA (resiliente a mudanças de DOM) | ⭐ Candidato para o scraping Paymobi |
 | **Trigger.dev** (`@trigger.dev/sdk`) | **4.7.3** | Jobs duráveis gerenciados | Alternativa gerenciada ao BullMQ |
 

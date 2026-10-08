@@ -2,7 +2,8 @@
 /**
  * @fileoverview Direct API-based service for Paymobi sales portal with Cel.cash integration.
  */
-import puppeteer from 'puppeteer';
+import { chromium } from 'playwright';
+import type { Browser } from 'playwright';
 import axios from 'axios';
 import { Mutex } from 'async-mutex';
 import logger from '../utils/logger.js';
@@ -11,19 +12,19 @@ import { searchContracts } from './helpers/paymobiApiHelper.js';
 import type { PaymobiResult, ClientData } from '../types/index.js';
 
 // Security fix: Shared browser instance with mutex to prevent race conditions
-let sharedBrowser: import('puppeteer').Browser | null = null;
+let sharedBrowser: Browser | null = null;
 const browserMutex = new Mutex();
 
-async function getSharedBrowser(): Promise<import('puppeteer').Browser> {
+async function getSharedBrowser(): Promise<Browser> {
   return await browserMutex.runExclusive(async () => {
-    if (sharedBrowser && sharedBrowser.connected) {
+    if (sharedBrowser && sharedBrowser.isConnected()) {
       return sharedBrowser;
     }
-    sharedBrowser = await puppeteer.launch({
+    sharedBrowser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
-    logger.info('Shared browser instance created');
+    logger.info('Shared browser instance created (Playwright chromium)');
     return sharedBrowser;
   });
 }

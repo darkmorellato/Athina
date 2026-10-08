@@ -95,6 +95,9 @@ O botão **Ouvir** do painel gera o áudio e tenta tocar automaticamente; se o n
 | `npm --prefix backend test` | Testes de fumaça do agente autônomo + aprendizado |
 | `npx --prefix backend tsx tests/_agent_precision.ts` | Precisão do agente com LLM real (NIM) — sem WhatsApp |
 | `npx --prefix backend tsx tests/_ai_smoke.ts` | Teste do AIService do painel com a chave do .env |
+| `npx --prefix backend tsx tests/_sqlite_services_smoke.ts` | SQLite: treinamento/analytics (round-trip + persistência) |
+| `npx --prefix backend tsx tests/_pix_processor_smoke.ts` | Processamento de PIX do scraper (Playwright, fixture local) |
+| `npm run test` / `npm run test:e2e` | Testes de componente (Vitest) / E2E do painel (Playwright) |
 | `npm --prefix backend run test:tts` | Teste de integração Node → TTS local |
 | `npm run build` / `npm run typecheck` / `npm run lint` | Build, tipos, lint do frontend |
 | `npm --prefix backend run typecheck` | Tipos do backend |

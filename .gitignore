@@ -45,3 +45,7 @@ __pycache__/
 
 # SQLite local (banco em runtime)
 backend/data/
+
+# Artefatos do Playwright
+test-results/
+playwright-report/
