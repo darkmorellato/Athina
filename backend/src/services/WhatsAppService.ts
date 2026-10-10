@@ -45,6 +45,8 @@ class WhatsAppService {
   private isSyncingPhonebook = false;
   private cacheCleanupInterval: ReturnType<typeof setInterval> | null = null;
   private watchdogInterval: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp da última sondagem getState() em READY (probe caro, 5 min) */
+  private lastReadyProbeAt = 0;
   private readonly MAX_CACHE_SIZE = 1000;
   private readonly MAX_CONTACT_MAP_SIZE = 5000;
 
@@ -322,12 +324,35 @@ class WhatsAppService {
     });
   }
 
-  /** Watchdog periódico: detecta sessão presa (Chrome travado sem emitir
-   *  'disconnected' ou presa fora de CONNECTED) e reinicializa o cliente. */
+  /** Watchdog periódico de recuperação (24/7):
+   *  1) Em QUALQUER estado, verifica se o browser do puppeteer continua vivo.
+   *     Um browser MORTO na tela de QR (estado QR_RECEIVED) não emite evento
+   *     nenhum e ficava preso para sempre — o painel seguia mostrando um QR
+   *     expirado e o scan falhava sem explicação. (isConnected() é estado
+   *     local do puppeteer — barato, sem round-trip.)
+   *  2) Com estado READY, além disso, getState() a cada 5 min detecta a
+   *     página travada (browser vivo, sessão morta). */
   private startWatchdog(): void {
     if (this.watchdogInterval) return;
     this.watchdogInterval = setInterval(async () => {
-      if (this.state !== STATES.READY || !this.client || this.isInitializing) return;
+      if (!this.client || this.isInitializing) return;
+
+      const browser = (this.client as unknown as {
+        pupBrowser?: { isConnected?: () => boolean };
+      }).pupBrowser;
+      const browserAlive =
+        typeof browser?.isConnected === 'function' ? browser.isConnected() : true;
+      if (!browserAlive) {
+        logger.warn('Watchdog: browser do WhatsApp morreu — reinicializando cliente');
+        await this.destroy();
+        this.scheduleReconnect();
+        return;
+      }
+
+      if (this.state !== STATES.READY) return;
+      const now = Date.now();
+      if (now - this.lastReadyProbeAt < 5 * 60 * 1000) return;
+      this.lastReadyProbeAt = now;
       try {
         const state = await Promise.race([
           this.client.getState(),
@@ -348,7 +373,7 @@ class WhatsAppService {
         await this.destroy();
         this.scheduleReconnect();
       }
-    }, 5 * 60 * 1000);
+    }, 60 * 1000);
     this.watchdogInterval.unref?.();
   }
 
