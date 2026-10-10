@@ -18,6 +18,9 @@ export default function App() {
     qrCodeData,
     statusMessage,
     messages,
+    selectedContact,
+    selectContact,
+    unread,
     chatList,
     historyMeta,
     isAgentTyping,
@@ -46,7 +49,8 @@ export default function App() {
 
   const [leftPanelWidth, setLeftPanelWidth] = useState(60);
   const [inputValue, setInputValue] = useState('');
-  const [selectedContact, setSelectedContact] = useState<string | null>(null);
+  // selectedContact agora vive no useSocket: a lógica de não-lidas precisa
+  // saber qual conversa está aberta no instante em que a mensagem chega.
 
   useEffect(() => {
     if (selectedContact) {
@@ -84,7 +88,9 @@ export default function App() {
           updateTrainingRules={updateTrainingRules}
           updateTrainingQas={updateTrainingQas}
           selectedContact={selectedContact}
-          setSelectedContact={setSelectedContact}
+          setSelectedContact={selectContact}
+          unreadCounts={unread.counts}
+          unreadMark={selectedContact ? unread.marks[selectedContact] : undefined}
           inputValue={inputValue}
           setInputValue={setInputValue}
           avatars={avatars}

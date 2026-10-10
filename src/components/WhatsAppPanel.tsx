@@ -10,6 +10,7 @@ import { SidebarHeader } from './WhatsAppPanel/SidebarHeader.tsx';
 import { classifyContact, isHostile } from './WhatsAppPanel/panelHelpers.js';
 import { TabBtn } from './WhatsAppPanel/TabBtn.js';
 import type { Message, ReplyTarget, TrainingData } from '../types/index.js';
+import type { UnreadMark } from '../hooks/socket/unreadLogic.js';
 import type { SendImageReplyPayload } from '@shared/contracts.js';
 // Note: SectorFilterBar is available but currently not used in the UI
 
@@ -39,6 +40,9 @@ interface WhatsAppPanelProps {
   /** Fotos de perfil (jid → url) e o pedido sob demanda */
   avatars: Record<string, string | null>;
   requestAvatars: (jids: string[]) => void;
+  /** Não-lidas por contato (badge verde) e o snapshot do chat aberto (divisória) */
+  unreadCounts: Record<string, number>;
+  unreadMark?: UnreadMark;
   /** Envia imagem (colada/arrastada) como resposta no WhatsApp */
   sendImage: (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption: string) => void;
 }
@@ -53,6 +57,7 @@ function WhatsAppPanel({
   inputValue, setInputValue,
   avatars, requestAvatars,
   sendImage,
+  unreadCounts, unreadMark,
 }: WhatsAppPanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('chats');
   const [searchQuery, setSearchQuery] = useState('');
@@ -130,6 +135,7 @@ function WhatsAppPanel({
         name: lastMsg?.fromName || fallbackName || id.split('@')[0],
         lastText: lastMsg?.text || '',
         time: lastMsg?.time || '',
+        unread: unreadCounts[id] ?? 0,
         isHostile: contactMsgs.some(isHostile),
         sector,
         sectorColor,
@@ -167,7 +173,7 @@ function WhatsAppPanel({
     });
 
     return list;
-  }, [messagesByContact, chatList]);
+  }, [messagesByContact, chatList, unreadCounts]);
 
   const selectedMessages = useMemo(() => {
     if (!selectedContact) return [];
@@ -208,6 +214,7 @@ function WhatsAppPanel({
             sector: 'Suporte',
             sectorColor: 'bg-blue-100 text-blue-800 border border-blue-200',
             sectorKey: 'suporte',
+            unread: 0,
           },
           ...result,
         ];
@@ -272,11 +279,13 @@ function WhatsAppPanel({
             {/* Chat Area */}
             <div className="wa-chat flex-1 flex flex-col bg-[#f5f1eb] relative overflow-hidden">
               <ChatView messages={selectedMessages} selectedContact={selectedContact}
+                unreadMark={unreadMark}
                 avatarUrl={selectedContact ? avatars[selectedContact] : undefined}
                 onReplyMessage={handleReplyMessage}
                 isAgentTyping={isAgentTyping}
                 hasMore={selectedMeta?.hasMore ?? false}
                 isLoadingOlder={selectedMeta?.loading ?? false}
+                historyLoaded={Boolean(selectedMeta && !selectedMeta.loading)}
                 onLoadOlder={handleLoadOlder} />
               {selectedContact && (
                 <MessageInput value={inputValue} onChange={setInputValue}

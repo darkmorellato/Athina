@@ -143,7 +143,7 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
       onKeyDown={handleKeyDown}
       role="option"
       aria-selected={isSelected}
-      aria-label={contact.name}
+      aria-label={contact.unread > 0 ? `${contact.name}, ${contact.unread} não lidas` : contact.name}
       tabIndex={0}
       style={{ height: ITEM_HEIGHT }}
       className={`flex items-center gap-3 px-4 box-border cursor-pointer hover:bg-gray-50
@@ -183,14 +183,25 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
               </span>
             )}
           </h3>
-          <span className="text-[10px] text-gray-400">{contact.time}</span>
+          <span
+            className={`text-xs ${
+              contact.unread > 0 ? 'text-[#1daa61] font-medium' : 'text-gray-400'
+            }`}
+          >
+            {contact.time}
+          </span>
         </div>
-        <div className="flex justify-between items-center mt-1">
-          <p className={`text-xs truncate max-w-[130px]
-            ${contact.isHostile ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
-            {contact.lastText}
-          </p>
-          <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase
+        <div className="flex justify-between items-center mt-1 gap-1">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className={`text-xs truncate max-w-[130px]
+              ${contact.isHostile ? 'text-red-500 font-medium' : contact.unread > 0 ? 'text-[#0a0a0a]' : 'text-gray-500'}`}>
+              {contact.lastText}
+            </p>
+            {contact.unread > 0 && (
+              <span className="wa-unread-badge">{contact.unread > 99 ? '99+' : contact.unread}</span>
+            )}
+          </div>
+          <span className={`px-1.5 py-0.5 rounded text-[8px] font-extrabold uppercase shrink-0
             ${contact.sectorColor}`}>
             {contact.sector}
           </span>

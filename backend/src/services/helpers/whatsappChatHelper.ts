@@ -23,6 +23,8 @@ export interface ChatEntry {
   /** 0 = contato sem conversa; 1 = prévia da última mensagem */
   messages: any[];
   timestamp: number;
+  /** Não-lidas do WhatsApp (chat.unreadCount) — badge verde na lista do painel */
+  unreadCount: number;
 }
 
 /** Resolve o melhor nome disponível para um contato/chat */
@@ -85,7 +87,11 @@ export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[
           // lastMessage pode falhar em chats vazios — segue como contato
         }
 
-        entries.push({ id, name, messages, timestamp });
+        const unreadCount =
+          typeof chat.unreadCount === 'number' && chat.unreadCount > 0
+            ? Math.floor(chat.unreadCount)
+            : 0;
+        entries.push({ id, name, messages, timestamp, unreadCount });
         seen.add(id);
       }
 
@@ -143,7 +149,7 @@ export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[
 
           seenNames.add(nameKey);
           if (numberKey) for (const v of numberVariants(numberKey)) seenNumbers.add(v);
-          entries.push({ id: jid, name, messages: [], timestamp: 0 });
+          entries.push({ id: jid, name, messages: [], timestamp: 0, unreadCount: 0 });
           seen.add(jid);
           added++;
         }

@@ -97,6 +97,8 @@ export interface LoadedChat {
   id: string;
   name: string;
   messages: ChatMessage[];
+  /** Não-lidas segundo o WhatsApp (chat.unreadCount) — baseline do badge do painel */
+  unreadCount?: number;
 }
 
 // ─── Estado de atendimento (servidor) ────────────────────────────────────────
@@ -224,6 +226,8 @@ export interface ClientToServerEvents {
   'update-chat-state': (payload: UpdateChatStatePayload) => void;
   'reset-chat-state': (payload: ContactIdPayload) => void;
   'get-contact-avatars': (payload: AvatarsRequestPayload) => void;
+  /** Marca a conversa como LIDA no WhatsApp (ticks azuis no cliente) */
+  'mark-chat-read': (payload: ContactIdPayload) => void;
   'get-stats': () => void;
   'reset-stats': () => void;
 }

@@ -23,6 +23,13 @@ import type {
 } from '../types/index.js';
 import { setupSocketEvents } from './socket/socketEvents.js';
 import { INITIAL_LOGS, DEFAULT_STATS } from './socket/socketHelpers.js';
+import {
+  EMPTY_UNREAD,
+  ingestChats,
+  ingestMessage,
+  markViewed,
+  type UnreadState,
+} from './socket/unreadLogic.js';
 
 // Admin token for privileged operations (e.g. restart). Priority: localStorage > build-time env.
 // Set via: localStorage.setItem('athina_admin_token', '<your ADMIN_SECRET>') in the browser console.
@@ -33,6 +40,13 @@ const getAdminToken = (): string | undefined => {
     return import.meta.env.VITE_ADMIN_TOKEN || undefined;
   }
 };
+
+/**
+ * Ligar (true) para que ABRIR a conversa também marque como lida NO WHATSAPP
+ * (ticks azuis para o cliente). Padrão: false — é visível ao cliente e
+ * depende do handler 'mark-chat-read' do backend.
+ */
+const MARK_READ_ON_OPEN = false;
 
 const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(
   import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001',
@@ -64,6 +78,11 @@ export default function useSocket() {
   const [serverStatus, setServerStatus] = useState<ServerStatus>('connecting');
   const [statusMessage, setStatusMessage] = useState('A inicializar o sistema...');
   const [messages, setMessages] = useState<Message[]>([]);
+  /** Conversa aberta (vive aqui: a lógica de não-lidas precisa dela ao vivo) */
+  const [selectedContact, setSelectedContactState] = useState<string | null>(null);
+  const selectedContactRef = useRef<string | null>(null);
+  /** Não-lidas por contato (badge verde + divisória, estilo WhatsApp) */
+  const [unread, setUnread] = useState<UnreadState>(EMPTY_UNREAD);
   const [chatList, setChatList] = useState<ChatListEntry[]>([]);
   const [historyMeta, setHistoryMeta] = useState<Record<string, HistoryMeta>>({});
   const [isAgentTyping, setIsAgentTyping] = useState(false);
@@ -98,6 +117,30 @@ export default function useSocket() {
   useEffect(() => { quickRepliesRef.current = quickReplies; }, [quickReplies]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { avatarsRef.current = avatars; }, [avatars]);
+
+  /** Abre a conversa: zera o badge e guarda o snapshot (count + 1ª não lida)
+   *  que a divisória "N mensagens não lidas" usa. */
+  const selectContact = useCallback((id: string | null) => {
+    selectedContactRef.current = id;
+    setSelectedContactState(id);
+    if (id) setUnread((prev) => markViewed(prev, id));
+    if (id && MARK_READ_ON_OPEN) socket.emit('mark-chat-read', { contactId: id });
+  }, []);
+
+  /** Baseline do backend (chats-loaded) — nunca regride contagem ao vivo. */
+  const ingestChatsUnread = useCallback((chats: Array<{ id: string; unreadCount?: number }>) => {
+    setUnread((prev) => ingestChats(prev, chats));
+  }, []);
+
+  /** Mensagem ao vivo: vira badge SÓ se for do cliente fora da conversa aberta. */
+  const ingestIncomingUnread = useCallback((chatId: string, msgId: string, isCustomer: boolean) => {
+    setUnread((prev) =>
+      ingestMessage(prev, chatId, msgId, {
+        isCustomer,
+        isActive: selectedContactRef.current === chatId,
+      })
+    );
+  }, []);
 
   const addLog = useCallback((text: string, type: AgentLog['type'] = 'info') => {
     setAgentLogs((prev) => {
@@ -171,6 +214,8 @@ export default function useSocket() {
       setChatList,
       setHistoryMeta,
       setIsAgentTyping,
+      ingestChatsUnread,
+      ingestIncomingUnread,
       quickRepliesRef,
       agentPersonaRef,
       selectedModelRef,
@@ -297,6 +342,9 @@ export default function useSocket() {
     serverStatus,
     statusMessage,
     messages,
+    selectedContact,
+    selectContact,
+    unread,
     chatList,
     historyMeta,
     isAgentTyping,

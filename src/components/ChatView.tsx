@@ -4,10 +4,11 @@
  * UX de scroll como no WhatsApp: autoscroll SÓ quando o usuário está no fim;
  * lendo o histórico, aparece o botão "ir para o fim" com contador de novas.
  */
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import type { Message } from '../types/index.js';
 import { buildTimeline } from './chat/chatLogic.js';
+import { dividerFor, type UnreadMark } from '../hooks/socket/unreadLogic.js';
 import { MessageBubble } from './chat/MessageBubble.js';
 import { avatarPaletteFor } from './waAvatarColors.js';
 
@@ -15,6 +16,8 @@ interface ChatViewProps {
   /** Messages ALREADY filtered for the selected contact (see WhatsAppPanel) */
   messages: Message[];
   selectedContact: string | null;
+  /** Snapshot de não-lidas da conversa aberta (divisória "N mensagens não lidas") */
+  unreadMark?: UnreadMark;
   /** Foto de perfil do contato selecionado (null = sem foto) */
   avatarUrl?: string | null;
   /** Inicia um reply citando a mensagem clicada */
@@ -23,17 +26,21 @@ interface ChatViewProps {
   /** Existem mensagens mais antigas para carregar? */
   hasMore?: boolean;
   isLoadingOlder?: boolean;
+  /** O histórico da conversa já terminou de carregar (1ª vez)? */
+  historyLoaded?: boolean;
   onLoadOlder?: () => void;
 }
 
 export const ChatView = memo(function ChatView({
   messages,
   selectedContact,
+  unreadMark,
   avatarUrl,
   onReplyMessage,
   isAgentTyping,
   hasMore,
   isLoadingOlder,
+  historyLoaded,
   onLoadOlder,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -46,11 +53,19 @@ export const ChatView = memo(function ChatView({
   const [showFab, setShowFab] = useState(false);
   const [unseen, setUnseen] = useState(0);
   const prevCountRef = useRef(0);
+  /** Divisória de não-lidas ainda não posicionada (histórico a caminho) */
+  const pendingDividerScrollRef = useRef(false);
+  /** Maior timestamp real já visto na conversa (filtra merges de histórico) */
+  const prevLastTsRef = useRef(0);
 
   // Hooks incondicionais (antes de qualquer return condicional).
   // useMemo: o parser de datas/grupos NÃO roda de novo quando só o estado
   // local (digitando, avatar falhado) muda.
   const timeline = useMemo(() => buildTimeline(messages), [messages]);
+
+  // Divisória "N mensagens não lidas": id exato (ao vivo) ou aproximação
+  // pelas N últimas mensagens de cliente (baseline do servidor).
+  const divider = useMemo(() => dividerFor(messages, unreadMark), [messages, unreadMark]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -84,12 +99,49 @@ export const ChatView = memo(function ChatView({
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const dividerEl = el.querySelector<HTMLElement>('[data-unread-divider]');
+    const maxTs = (list: Message[]): number =>
+      list.reduce((mx, m) => Math.max(mx, m.timestamp ?? 0), 0);
+    /** Posiciona a divisória de não-lidas perto do TOPO (como no WA) */
+    const positionAtDivider = (): boolean => {
+      if (!dividerEl) return false;
+      el.scrollTop += dividerEl.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+      atBottomRef.current = false;
+      setShowFab(true);
+      return true;
+    };
     const switched = prevContactRef.current !== selectedContact;
+    // Âncora EXATA (id ao vivo) é estável; a APROXIMADA (baseline do
+    // servidor) depende do histórico — e a posição sempre espera o merge
+    // terminar, senão a divisória "pula" quando o histórico chega.
+    const exactAnchor = Boolean(unreadMark?.firstUnreadId);
+    const canPosition =
+      Boolean(dividerEl) && !isLoadingOlder && (exactAnchor || Boolean(historyLoaded));
     if (switched) {
-      el.scrollTop = el.scrollHeight;
-      atBottomRef.current = true;
       setUnseen(0);
-      setShowFab(false);
+      if (canPosition) {
+        pendingDividerScrollRef.current = false;
+        positionAtDivider();
+      } else if (unreadMark) {
+        pendingDividerScrollRef.current = true;
+        el.scrollTop = el.scrollHeight;
+        atBottomRef.current = true;
+        setShowFab(false);
+      } else {
+        pendingDividerScrollRef.current = false;
+        el.scrollTop = el.scrollHeight;
+        atBottomRef.current = true;
+        setShowFab(false);
+      }
+      prevLastTsRef.current = maxTs(messages);
+    } else if (pendingDividerScrollRef.current) {
+      if (canPosition) {
+        positionAtDivider();
+        pendingDividerScrollRef.current = false;
+      } else if (!isLoadingOlder && historyLoaded) {
+        // Histórico terminou e não há divisória para posicionar
+        pendingDividerScrollRef.current = false;
+      }
     } else if (loadingOlderRef.current) {
       const delta = el.scrollHeight - savedScrollHeightRef.current;
       el.scrollTop = el.scrollTop + Math.max(delta, 0);
@@ -97,15 +149,24 @@ export const ChatView = memo(function ChatView({
     } else if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     } else {
+      // Só conta como "novas" mensagens MAIS RECENTES que a última vista —
+      // merges de HISTÓRICO (mais antigas) não inflam o contador do FAB.
       const added = messages.length - prevCountRef.current;
       if (added > 0) {
-        setUnseen((u) => u + added);
-        setShowFab(true);
+        const newOnes = messages
+          .slice(prevCountRef.current)
+          .filter((m) => (m.timestamp ?? Number.MAX_SAFE_INTEGER) >= prevLastTsRef.current)
+          .length;
+        if (newOnes > 0) {
+          setUnseen((u) => u + newOnes);
+          setShowFab(true);
+        }
       }
     }
     prevCountRef.current = messages.length;
+    prevLastTsRef.current = Math.max(prevLastTsRef.current, maxTs(messages));
     prevContactRef.current = selectedContact;
-  }, [messages, selectedContact]);
+  }, [messages, selectedContact, unreadMark, isLoadingOlder, historyLoaded]);
 
   if (!selectedContact) {
     return (
@@ -181,14 +242,21 @@ export const ChatView = memo(function ChatView({
               <span className="wa-date">{item.label}</span>
             </div>
           ) : (
-            <MessageBubble
-              key={item.msg.id}
-              msg={item.msg}
-              firstInGroup={item.firstInGroup}
-              lastInGroup={item.lastInGroup}
-              avatarUrl={avatarUrl}
-              onReply={onReplyMessage}
-            />
+            <Fragment key={item.msg.id}>
+              {/* Divisória "N mensagens não lidas" (pílula verde do WhatsApp) */}
+              {divider && item.msg.id === divider.id && (
+                <div className="wa-date-wrap" data-unread-divider>
+                  <span className="wa-unread-divider">{divider.label}</span>
+                </div>
+              )}
+              <MessageBubble
+                msg={item.msg}
+                firstInGroup={item.firstInGroup}
+                lastInGroup={item.lastInGroup}
+                avatarUrl={avatarUrl}
+                onReply={onReplyMessage}
+              />
+            </Fragment>
           )
         )}
 

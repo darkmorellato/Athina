@@ -100,6 +100,10 @@ export function createSocketHandlers(
       ...(typeof msg.ack === 'number' ? { ack: msg.ack } : {}),
     };
 
+    // Não-lidas: mensagem NOVA do cliente fora da conversa aberta vira badge
+    // verde na lista (dentro da conversa aberta quem cobre é o FAB).
+    handlers.ingestIncomingUnread(newMsg.fromId, newMsg.id, newMsg.sender === 'customer');
+
     setMessages((prev) => {
       let next = prev;
       // Mensagens dos fluxos do painel são renderizadas localmente (id sintético

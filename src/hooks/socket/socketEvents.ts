@@ -3,7 +3,7 @@
  * Handles all real-time communication with the backend.
  */
 import type { Socket } from 'socket.io-client';
-import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
+import type { ClientToServerEvents, LoadedChat, ServerToClientEvents } from '@shared/contracts.js';
 import type { Message, WAMessage, AgentLog } from '../../types/index.js';
 import type { AnalyticsStats } from '../../types/index.js';
 import { createSocketHandlers } from './socketHandlers.js';
@@ -35,6 +35,9 @@ export interface SocketEventHandlers {
   isAgentActiveRef: React.MutableRefObject<boolean>;
   serverAutoReplyRef: React.MutableRefObject<boolean>;
   messagesRef: React.MutableRefObject<Message[]>;
+  /** Não-lidas: baseline do backend + mensagens ao vivo (ver unreadLogic.ts) */
+  ingestChatsUnread: (chats: Array<{ id: string; unreadCount?: number }>) => void;
+  ingestIncomingUnread: (chatId: string, msgId: string, isCustomer: boolean) => void;
   socket: Socket<ServerToClientEvents, ClientToServerEvents>;
 }
 
@@ -56,9 +59,12 @@ export function setupSocketEvents(
     handlePaymobiError,
   } = createSocketHandlers(socket, handlers);
 
-  const handleChatsLoaded = (loadedChats: Array<{ id: string; name: string; messages: Message[] }>) => {
+  const handleChatsLoaded = (loadedChats: LoadedChat[]) => {
     // Lista completa de contatos + conversas (sidebar estilo WhatsApp Web)
     handlers.setChatList(loadedChats.map((c) => ({ id: c.id, name: c.name })));
+
+    // Não-lidas: baseline do WhatsApp (nunca regride a contagem ao vivo)
+    handlers.ingestChatsUnread(loadedChats);
 
     // Merge por id — preserva histórico já carregado e evita duplicatas
     handlers.setMessages((prev) => {

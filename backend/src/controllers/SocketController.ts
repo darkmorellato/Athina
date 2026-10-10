@@ -354,6 +354,30 @@ class SocketController {
       }
     });
 
+    // ─── Marcar conversa como LIDA no WhatsApp (ticks azuis no cliente) ────
+    // Handler pronto porém DORMENTE: o painel só o aciona quando
+    // MARK_READ_ON_OPEN estiver ligado no frontend (useSocket.ts), porque
+    // enviar recibo de leitura é VISÍVEL PARA O CLIENTE.
+    socket.on('mark-chat-read', async (data: unknown) => {
+      const parsed = contactIdSchema.safeParse(data);
+      if (!parsed.success) {
+        logger.warn({ socketId: socket.id }, 'Invalid mark-chat-read payload rejected');
+        return;
+      }
+      try {
+        const client = whatsAppService.getClient();
+        if (client && whatsAppService.getClientState() === 'READY') {
+          const chat = await client.getChatById(parsed.data.contactId);
+          await chat.sendSeen();
+        }
+      } catch (err) {
+        logger.warn(
+          { error: err instanceof Error ? err.message : String(err), chatId: parsed.data.contactId },
+          'mark-chat-read failed'
+        );
+      }
+    });
+
     // ─── Avatares (foto de perfil dos contatos) ───────────────────────────
     socket.on('get-contact-avatars', (data: unknown) => {
       if (!avatarRateLimiter.isAllowed(socket.id)) {

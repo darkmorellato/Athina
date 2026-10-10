@@ -114,6 +114,11 @@
     U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
+/* Token global (a lista lateral usa o verde do badge FORA do escopo .wa-chat) */
+:root {
+  --wa-accent: #1daa61;
+}
+
 /* Escopo da conversa: tokens e tipografia do WhatsApp Web */
 .wa-chat {
   --wa-bg: #f5f1eb;
@@ -229,6 +234,32 @@
   padding: 6px 12px;
   border-radius: 7.5px;
   box-shadow: var(--wa-shadow);
+}
+
+/* Divisória "N mensagens não lidas" — pílula VERDE do WhatsApp */
+.wa-unread-divider {
+  background: var(--wa-accent);
+  color: #fff;
+  font-size: 12.5px;
+  line-height: 15px;
+  padding: 6px 12px;
+  border-radius: 7.5px;
+  box-shadow: var(--wa-shadow);
+}
+
+/* Badge verde de não-lidas da LISTA lateral (fora do escopo .wa-chat) */
+.wa-unread-badge {
+  background: var(--wa-accent);
+  color: #fff;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 500;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 /* Bolha */

@@ -23,6 +23,8 @@ export interface Contact {
   sector: string;
   sectorColor: string;
   sectorKey: string;
+  /** Não-lidas (badge verde na lista, estilo WhatsApp) */
+  unread: number;
 }
 
 // AI Response Types
