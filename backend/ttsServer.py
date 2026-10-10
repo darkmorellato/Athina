@@ -10,6 +10,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import soundfile as sf
 from kokoro_onnx import Kokoro
 
+from tts_normalize import normalize_pt_br
+
 print("Carregando modelo Kokoro local na memoria...")
 start = time.time()
 
@@ -227,6 +229,14 @@ class TTSHandler(BaseHTTPRequestHandler):
             text = str(payload.get("text", "")).strip()
             if not text:
                 self._reply_json(400, {"success": False, "error": "Texto vazio"})
+                return
+            # Normalização pt-BR para fala natural (números, moeda, datas,
+            # emoji, markdown) — ver tts_normalize.py. "normalize": false
+            # permite texto cru para depuração.
+            if payload.get("normalize", True):
+                text = normalize_pt_br(text)
+            if not text:
+                self._reply_json(400, {"success": False, "error": "Texto vazio apos normalizacao"})
                 return
             if len(text) > MAX_TEXT_CHARS:
                 text = text[:MAX_TEXT_CHARS]

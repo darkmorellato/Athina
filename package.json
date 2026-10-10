@@ -8,7 +8,7 @@
     "dev:frontend": "vite",
     "dev:backend": "npm --prefix backend run dev",
     "dev:tts": "sh -c 'if curl -sf http://127.0.0.1:5050/health >/dev/null 2>&1; then echo \"TTS já ativo em 5050 — reutilizando o servidor existente\"; elif [ -x backend/.venv/bin/python ]; then backend/.venv/bin/python backend/ttsServer.py; else python3 backend/ttsServer.py; fi'",
-    "setup:tts": "sh -c 'if command -v uv >/dev/null 2>&1; then uv venv --python 3.13 backend/.venv && uv pip install --python backend/.venv/bin/python kokoro-onnx soundfile; else python3 -m venv backend/.venv && backend/.venv/bin/pip install kokoro-onnx soundfile; fi'",
+    "setup:tts": "sh -c 'if command -v uv >/dev/null 2>&1; then uv venv --python 3.13 backend/.venv && uv pip install --python backend/.venv/bin/python kokoro-onnx soundfile num2words; else python3 -m venv backend/.venv && backend/.venv/bin/pip install kokoro-onnx soundfile num2words; fi'",
     "build": "vite build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
