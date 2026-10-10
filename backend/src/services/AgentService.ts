@@ -175,6 +175,10 @@ const MAX_INPUT_CHARS = 2000;
 const TAKEOVER_WINDOW_MS = 10 * 60 * 1000;
 /** Mensagens de fallback (erro de LLM / mídia): no máximo 1 por contato por hora. */
 const FALLBACK_COOLDOWN_MS = 60 * 60 * 1000;
+/** Deadline por mensagem: ao estourar, a fila do contato é liberada (a
+ *  resposta em andamento, se completar, ainda é enviada ao cliente). Antes
+ *  não havia teto global: pior caso teórico ~30min segurando a fila. */
+const AGENT_DEADLINE_MS = 180_000;
 const MEDIA_GUIDANCE =
   'No momento consigo atender apenas mensagens de texto. 😊 ' +
   'Pode digitar sua dúvida? Se preferir, um atendente humano poderá te ajudar com áudios e imagens.';
@@ -359,7 +363,27 @@ export class AgentService {
           }
           return;
         }
-        await this.processMessage(from, boundedText);
+        // Deadline global por mensagem: nenhuma resposta pode segurar a fila
+        // do contato indefinidamente. Ao estourar, a fila é liberada; o
+        // trabalho em andamento segue e, se concluir, ainda é enviado.
+        const deadline = new Promise<void>((resolve) => {
+          const t = setTimeout(() => {
+            logger.warn(
+              { contactId: from, deadlineMs: AGENT_DEADLINE_MS },
+              '[Agent] Deadline de processamento excedido — liberando a fila do contato'
+            );
+            resolve();
+          }, AGENT_DEADLINE_MS);
+          if (typeof t.unref === 'function') t.unref();
+        });
+        const work = this.processMessage(from, boundedText).catch(async (err) => {
+          logger.error(
+            { error: err instanceof Error ? err.message : String(err), from },
+            '[Agent] Failed to process incoming message'
+          );
+          await this.sendOncePerHour(from, ERROR_FALLBACK);
+        });
+        await Promise.race([work, deadline]);
       })
       .catch((err) => {
         logger.error(
@@ -425,8 +449,15 @@ export class AgentService {
     let toolsCalled = 0;
     let docRetries = 0;
 
-    // CPF/IMEI na mensagem do cliente (formatado ou dígitos corridos).
-    const hasDocument = /\b\d{11}\b|\b\d{15}\b|\d{3}\.\d{3}\.\d{3}-\d{2}/.test(text);
+    // CPF/IMEI na mensagem do cliente: formatado (123.456.789-01), com contexto
+    // de documento (cpf/cnpj/imei/documento) ou mensagem composta SÓ de dígitos
+    // (fluxo comum de enviar o CPF sozinho). Um telefone no meio de uma frase
+    // não dispara mais os retries obrigatórios de tool.
+    const onlyDigitsMsg = /^[\s\d.\-/]+$/.test(text) && text.replace(/\D/g, '').length >= 11;
+    const hasDocument =
+      /\d{3}\.\d{3}\.\d{3}-\d{2}/.test(text) ||
+      ((/\b(cpf|cnpj|imei|documento|identifica)/i.test(text) || onlyDigitsMsg) &&
+        text.replace(/\D/g, '').length >= 11);
 
     for (let step = 0; step < config.agentMaxSteps; step++) {
       const assistant = await this.deps.chatCompletion(messages, TOOLS);
@@ -563,9 +594,12 @@ export class AgentService {
   private async sendOncePerHour(contactId: string, text: string): Promise<void> {
     const last = this.fallbackSentAt.get(contactId);
     if (typeof last === 'number' && Date.now() - last < FALLBACK_COOLDOWN_MS) return;
-    this.fallbackSentAt.set(contactId, Date.now());
     try {
       await this.deps.sendMessage(contactId, text);
+      // Cooldown gravado SÓ após envio bem-sucedido — antes, uma falha de
+      // envio bloqueava o fallback por 1 hora (violava "nunca deixar o
+      // cliente sem resposta").
+      this.fallbackSentAt.set(contactId, Date.now());
     } catch (err) {
       logger.warn(
         { error: err instanceof Error ? err.message : String(err), contactId },
@@ -603,7 +637,9 @@ export class AgentService {
           maxOutputTokens: 2048,
           // O retry fica por conta do loop abaixo (mesma semântica de antes).
           maxRetries: 0,
-          abortSignal: AbortSignal.timeout(120_000),
+          // 45s por tentativa (antes 120s): com 3 tentativas e até 5 passos
+          // do loop, 120s permitia dezenas de minutos por mensagem.
+          abortSignal: AbortSignal.timeout(45_000),
         });
 
         const toolCalls: ToolCall[] | undefined = result.toolCalls.length
@@ -659,7 +695,7 @@ export class AgentService {
     const result = await scraper.scrape({
       query,
       clientName,
-      searchType: query.length === 15 ? 'imei' : 'cpf',
+      searchType: query.length === 15 ? 'imei' : query.length === 14 ? 'cnpj' : 'cpf',
     });
 
     if (!result.success) {

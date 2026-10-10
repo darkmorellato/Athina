@@ -48,6 +48,8 @@ const envSchema = z.object({
   AGENT_MAX_STEPS: z.coerce.number().min(1).max(10).default(5),
   // Local TTS server (Kokoro ONNX)
   TTS_SERVER_URL: z.string().url().default('http://127.0.0.1:5050'),
+  // Reverse proxy hops para o rate limit por IP (0 = exposição direta)
+  TRUST_PROXY: z.coerce.number().min(0).max(10).default(0),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -91,6 +93,7 @@ const configObj = {
     'deepseek-ai/deepseek-v4.1-flash',
   agentMaxSteps: env.AGENT_MAX_STEPS,
   ttsServerUrl: env.TTS_SERVER_URL,
+  trustProxy: env.TRUST_PROXY,
 } as const;
 
 export default configObj;

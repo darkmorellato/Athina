@@ -57,6 +57,8 @@ export const waMessageSchema = z.object({
   sender: z.enum(['customer', 'agent']).optional(),
   mediaMimeType: z.string().optional(),
   mediaData: z.string().optional(),
+  /** true quando a mídia excedeu o teto do broadcast (sem mediaData) */
+  mediaOmitted: z.boolean().optional(),
   /** Unix timestamp em SEGUNDOS — o painel ordena a conversa por ele */
   timestamp: z.number().optional(),
   /** id SERIALIZADO no formato do WhatsApp (necessário para citar/responder) */
@@ -183,7 +185,7 @@ export type UpdateChatStatePayload = z.infer<typeof updateChatStateSchema>;
 export const paymobiConsultSchema = z.object({
   query: z.string().min(1).max(50),
   clientName: z.string().max(200).optional(),
-  searchType: z.enum(['imei', 'cpf', 'name']).optional(),
+  searchType: z.enum(['imei', 'cpf', 'cnpj', 'name']).optional(),
   contactId: z.string().max(200).optional(),
 });
 export type PaymobiConsultPayload = z.infer<typeof paymobiConsultSchema>;
@@ -238,6 +240,7 @@ export interface ServerToClientEvents {
   }) => void;
   'ai-response': (data: AIResponsePayload) => void;
   'ai-error': (data: { message: string }) => void;
+  'send-failed': (data: { to: string; reason: string }) => void;
   'analytics-stats': (stats: AnalyticsStats) => void;
   'training-data': (data: TrainingData) => void;
   'training-data-updated': (data: TrainingData) => void;

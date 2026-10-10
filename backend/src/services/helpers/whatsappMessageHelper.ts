@@ -2,6 +2,16 @@
  * @fileoverview Helper for handling real-time WhatsApp messages.
  */
 import logger from '../../utils/logger.js';
+import { maskPhone } from '../../utils/redact.js';
+
+/**
+ * Teto do broadcast de mídia em tempo real, em caracteres de base64
+ * (≈3,7MB binários). Espelha o limite do histórico; acima disso a mídia NÃO
+ * é baixada/reenviada no evento — só o placeholder (mediaOmitted).
+ * Antes: downloadMedia() completo + emit sem cap — um documento de 100MB
+ * virava ~133MB de base64 em memória e no socket.
+ */
+const MAX_MEDIA_BASE64_CHARS = 5 * 1024 * 1024;
 
 /** Handle incoming or outgoing WhatsApp messages and emit socket events */
 export async function handleIncomingMessage(
@@ -9,21 +19,39 @@ export async function handleIncomingMessage(
   emit: (event: string, data: any) => void
 ): Promise<void> {
   if (msg.from?.includes('broadcast') || msg.to?.includes('broadcast')) return;
-  
+
   logger.info(
-    { from: msg.from, bodyLength: (msg.body ?? '').length, fromMe: msg.fromMe },
+    { from: maskPhone(msg.from), bodyLength: (msg.body ?? '').length, fromMe: msg.fromMe },
     'WhatsApp message created/received'
   );
 
   let mediaData: string | undefined;
   let mediaMimeType: string | undefined;
+  let mediaOmitted = false;
 
   if (msg.hasMedia) {
     try {
-      const media = await msg.downloadMedia();
-      if (media) {
-        mediaData = media.data;
-        mediaMimeType = media.mimetype;
+      // Tamanho declarado (bytes) — evita o download quando já é grande demais
+      const declaredSize = Number(msg._data?.size ?? msg.size ?? 0);
+      if (declaredSize > MAX_MEDIA_BASE64_CHARS) {
+        mediaOmitted = true;
+      } else {
+        const media = await msg.downloadMedia();
+        if (media) {
+          if (typeof media.data === 'string' && media.data.length > MAX_MEDIA_BASE64_CHARS) {
+            mediaOmitted = true;
+          } else {
+            mediaData = media.data;
+            mediaMimeType = media.mimetype;
+          }
+        }
+      }
+      if (mediaOmitted) {
+        mediaMimeType = mediaMimeType ?? String(msg._data?.mimetype ?? 'application/octet-stream');
+        logger.warn(
+          { from: maskPhone(msg.from), declaredSize },
+          'Mídia grande demais para o broadcast em tempo real — omitida'
+        );
       }
     } catch (mediaErr) {
       logger.warn(
@@ -69,5 +97,6 @@ export async function handleIncomingMessage(
     sender: msg.fromMe ? 'agent' : 'customer',
     mediaData,
     mediaMimeType,
+    ...(mediaOmitted ? { mediaOmitted: true } : {}),
   });
 }

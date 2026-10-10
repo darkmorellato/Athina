@@ -145,14 +145,22 @@ export class AnalyticsService {
   /**
    * Get current analytics stats.
    */
+  /** Snapshot do espelho durável (SQLite) para hidratar leituras. */
+  private snapshotStats(): AnalyticsStats {
+    return { ...this.memoryStats, intentCounts: { ...this.memoryStats.intentCounts } };
+  }
+
   async getStats(): Promise<AnalyticsStats> {
     return redisService.safeExecute(
       async () => {
         const raw = await redisService.client.get(STATS_KEY);
-        if (!raw) return { ...DEFAULT_STATS };
+        // Redis vazio (expirou/limpou): hidrata do espelho SQLite em vez de
+        // zerar — antes o primeiro increment gravava DEFAULT+1 e "engolia"
+        // o histórico durável.
+        if (!raw) return this.snapshotStats();
         return safeParseStats(raw);
       },
-      { ...this.memoryStats, intentCounts: { ...this.memoryStats.intentCounts } } // Fallback durável (SQLite)
+      this.snapshotStats()
     );
   }
 
@@ -304,7 +312,8 @@ export class AnalyticsService {
    */
   private async getStatsFromRedis(): Promise<AnalyticsStats> {
     const raw = await redisService.client.get(STATS_KEY);
-    if (!raw) return { ...DEFAULT_STATS };
+    // Base do read-modify-write: sem chave no Redis, parte do espelho durável.
+    if (!raw) return this.snapshotStats();
     return safeParseStats(raw);
   }
 }

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import logger from '../../utils/logger.js';
+import { maskDocument, maskName } from '../../utils/redact.js';
 
 export async function searchContracts(token: string, query: string, clientName?: string): Promise<any[]> {
   const cleanQuery = query.replace(/\D/g, ''); // strip non-numeric for cpf/imei
@@ -9,7 +10,8 @@ export async function searchContracts(token: string, query: string, clientName?:
   let contracts: any[] = [];
 
   if (isImei) {
-    logger.info({ imei: cleanQuery }, '[PaymobiScraperService] Searching by IMEI');
+    // LGPD: nunca logar o IMEI cru — só o formato mascarado.
+    logger.info({ imei: maskDocument(cleanQuery) }, '[PaymobiScraperService] Searching by IMEI');
     const searchResponse = await axios.post('https://paymobi-fin-api.azurewebsites.net/sells/search', {
       search: cleanQuery
     }, {
@@ -24,7 +26,7 @@ export async function searchContracts(token: string, query: string, clientName?:
     const nameToSearch = (clientName || query).trim();
 
     // Strategy A: Exact Name/Full Name
-    logger.info({ name: nameToSearch }, '[PaymobiScraperService] Attempting Strategy A: Exact Name');
+    logger.info({ name: maskName(nameToSearch) }, '[PaymobiScraperService] Attempting Strategy A: Exact Name');
     try {
       const response = await axios.post('https://paymobi-fin-api.azurewebsites.net/sells/search', {
         customerName: nameToSearch
@@ -45,7 +47,7 @@ export async function searchContracts(token: string, query: string, clientName?:
       const words = nameToSearch.split(/\s+/).filter(w => w.length > 2);
       if (words.length >= 2) {
         const partialName = `${words[0]} ${words[1]}`;
-        logger.info({ partialName }, '[PaymobiScraperService] Attempting Strategy B: First Two Words');
+        logger.info({ partialName: maskName(partialName) }, '[PaymobiScraperService] Attempting Strategy B: First Two Words');
         try {
           const response = await axios.post('https://paymobi-fin-api.azurewebsites.net/sells/search', {
             customerName: partialName
@@ -71,7 +73,7 @@ export async function searchContracts(token: string, query: string, clientName?:
       const words = nameToSearch.split(/\s+/).filter(w => w.length > 2);
       if (words.length >= 1) {
         const firstName = words[0];
-        logger.info({ firstName }, '[PaymobiScraperService] Attempting Strategy C: First Word');
+        logger.info({ firstName: maskName(firstName) }, '[PaymobiScraperService] Attempting Strategy C: First Word');
         try {
           const response = await axios.post('https://paymobi-fin-api.azurewebsites.net/sells/search', {
             customerName: firstName

@@ -3,6 +3,7 @@
  */
 import express from 'express';
 import http from 'http';
+import crypto from 'crypto';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -20,6 +21,12 @@ import { initLlmTracing } from './services/llmTracer.js';
 
 process.on('uncaughtException', (error) => {
   logger.error({ error: error instanceof Error ? error.stack : String(error) }, 'Uncaught Exception captured');
+  // Em produção, uma exceção não capturada deixa o processo "vivo" com estado
+  // possivelmente corrompido: encerra para o supervisor (systemd/pm2)
+  // reiniciar limpo. Em dev, segue apenas o log (tsx watch não supervisiona).
+  if (config.nodeEnv === 'production') {
+    void gracefulShutdown('uncaughtException', 1);
+  }
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -27,6 +34,13 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const app = express();
+
+// Atrás de reverse proxy (nginx/traefik), configure TRUST_PROXY=<nº de hops>
+// para o rate limit por IP enxergar o cliente real; 0 (default) = exposição
+// direta — não ativar sem proxy, senão X-Forwarded-For vira spoof de limite.
+if (config.trustProxy > 0) {
+  app.set('trust proxy', config.trustProxy);
+}
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -68,6 +82,31 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
   },
 });
 
+// ─── Autenticação do painel (Socket.IO) ─────────────────────────────────────
+// Sem isto, qualquer cliente TCP que alcance a porta recebe o QR do WhatsApp
+// (takeover de sessão), o histórico de conversas e pode enviar mensagens em
+// nome da empresa (CORS não protege clientes não-browser).
+// Com ADMIN_SECRET configurado, o handshake exige o token (o painel o envia
+// via socket.handshake.auth.token). Sem ADMIN_SECRET, só loopback é aceito.
+io.use((socket, next) => {
+  const secret = config.adminSecret;
+  if (!secret) {
+    const addr = socket.handshake.address || '';
+    const isLoopback = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+    if (isLoopback) return next();
+    logger.warn({ socketId: socket.id, addr }, 'Socket não-local rejeitado (ADMIN_SECRET não configurado)');
+    return next(new Error('Unauthorized'));
+  }
+  const token = String((socket.handshake.auth as { token?: unknown } | undefined)?.token ?? '');
+  const a = Buffer.from(token);
+  const b = Buffer.from(secret);
+  if (a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b)) {
+    return next();
+  }
+  logger.warn({ socketId: socket.id }, 'Socket rejeitado: token inválido');
+  return next(new Error('Unauthorized'));
+});
+
 const socketController = new SocketController(io);
 
 // Tracing opcional das chamadas de LLM (OTel → Langfuse).
@@ -87,17 +126,28 @@ io.on('connection', (socket) => {
 whatsAppService.setEmitter(io);
 
 // Health check with service status and memory metrics
-/** Quick TTS readiness probe (2s timeout, never throws). */
+/** Quick TTS readiness probe (2s timeout, result cached 15s, never throws). */
+let ttsProbeCache: { at: number; healthy: boolean } = { at: 0, healthy: false };
 async function checkTtsHealth(): Promise<boolean> {
+  const now = Date.now();
+  if (now - ttsProbeCache.at < 15_000) return ttsProbeCache.healthy;
   try {
     const res = await fetch(`${config.ttsServerUrl}/health`, {
       signal: AbortSignal.timeout(2000),
     });
-    return res.ok;
+    ttsProbeCache = { at: now, healthy: res.ok };
   } catch {
-    return false;
+    ttsProbeCache = { at: now, healthy: false };
   }
+  return ttsProbeCache.healthy;
 }
+
+// Liveness para supervisores: SEMPRE responde 200 enquanto o processo vive.
+// Reconexão do WhatsApp/Redis NÃO deve disparar restart do serviço — use este
+// endpoint para "está de pé?" e o /health para "está pronto?".
+app.get('/live', (_req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
 app.get('/health', async (_req, res) => {
   const health = {
@@ -163,7 +213,7 @@ server.listen(PORT, async () => {
 
 let isShuttingDown = false;
 
-async function gracefulShutdown(signal: string): Promise<void> {
+async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
@@ -176,7 +226,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   // otherwise Chrome gets SIGKILLed and leaves crash dumps behind.
   const forceExit = setTimeout(() => {
     logger.warn('Forced shutdown after timeout');
-    process.exit(0);
+    process.exit(exitCode);
   }, 4000);
   forceExit.unref();
 
@@ -189,7 +239,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
 
   logger.info('Server closed');
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));

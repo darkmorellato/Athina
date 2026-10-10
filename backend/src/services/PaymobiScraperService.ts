@@ -114,6 +114,7 @@ export class PaymobiScraperService {
       const cleanQuery = params.query.replace(/\D/g, ''); // strip non-numeric for cpf/imei
       const isImei = cleanQuery.length === 15;
       const isCpf = cleanQuery.length === 11;
+      const isCnpj = cleanQuery.length === 14;
 
       const contracts = await searchContracts(token, params.query, params.clientName);
 
@@ -132,6 +133,13 @@ export class PaymobiScraperService {
         matchedContracts = contracts.filter((c: any) => {
           const cImei = String(c.imei || '').replace(/\D/g, '');
           return cImei === cleanQuery;
+        });
+      } else if (isCnpj) {
+        // Match exato de CNPJ: sem isto a busca por nome podia devolver
+        // contrato de OUTRO titular e o fluxo selecionava o primeiro ativo.
+        matchedContracts = contracts.filter((c: { cnpj?: unknown }) => {
+          const cCnpj = String(c.cnpj || '').replace(/\D/g, '');
+          return cCnpj === cleanQuery;
         });
       }
 
@@ -190,17 +198,17 @@ export class PaymobiScraperService {
       // 5. Process PIX code using shared browser instance (avoids launching new browser per request)
       let pix = { pixCode: '', pixUrl: '', qrCodePath: '' };
       if (openInstallment.boletoLink) {
-        logger.info({ url: openInstallment.boletoLink }, '[PaymobiScraperService] Processing PIX for open installment');
+        logger.info('[PaymobiScraperService] Processing PIX for open installment');
         try {
           const browser = await getSharedBrowser();
           pix = await processPixPayment(browser, openInstallment.boletoLink);
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e);
+          // NÃO fechar o browser compartilhado aqui: consultas concorrentes usam
+          // o mesmo Chromium — fechar derrubava as páginas delas. A page do PIX
+          // fecha em processPixPayment; browser morto é recriado por
+          // getSharedBrowser (checa isConnected).
           logger.warn({ error: errMsg }, 'Failed to process PIX payment from boletoLink');
-          // Security fix: Properly close browser before resetting to prevent zombie Chromium processes
-          await closeSharedBrowser().catch((closeErr) => {
-            logger.error({ error: closeErr instanceof Error ? closeErr.message : String(closeErr) }, 'Failed to close browser during error recovery');
-          });
         }
       }
 

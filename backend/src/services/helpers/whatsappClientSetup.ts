@@ -71,7 +71,7 @@ export interface ClientEventHandlers {
 
 /** Start automation to auto-click "Use here" button */
 export function startUseHereAutomation(client: Client): ReturnType<typeof setInterval> {
-  return setInterval(async () => {
+  const interval: ReturnType<typeof setInterval> = setInterval(async () => {
     try {
       const pupPage = (client as unknown as { pupPage?: import('puppeteer').Page }).pupPage;
       if (!pupPage) return;
@@ -90,9 +90,15 @@ export function startUseHereAutomation(client: Client): ReturnType<typeof setInt
         return false;
       });
 
-      if (clicked) logger.info('[Automation] "Use here" button pressed!');
+      if (clicked) {
+        logger.info('[Automation] "Use here" button pressed!');
+        // Objetivo cumprido — não manter o intervalo avaliando a página a
+        // cada 2s para sempre (~43 mil evaluates/dia depois do READY).
+        clearInterval(interval);
+      }
     } catch {
       // Ignore errors during initial page load
     }
   }, 2000);
+  return interval;
 }

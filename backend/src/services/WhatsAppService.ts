@@ -7,15 +7,18 @@ const { Client, LocalAuth } = pkg;
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import logger from '../utils/logger.js';
 import chatStateService from './ChatStateService.js';
 import { setupClientEvents, startUseHereAutomation, PUPPETEER_ARGS } from './helpers/whatsappClientSetup.js';
 import { getRecentChats } from './helpers/whatsappChatHelper.js';
 import { syncPhonebookContacts } from './helpers/whatsappPhonebookHelper.js';
 import { handleIncomingMessage } from './helpers/whatsappMessageHelper.js';
+import { clearAvatarCache } from './helpers/whatsappAvatarHelper.js';
 import type { WhatsAppState, WhatsAppConnectionStatus } from '../types/index.js';
 const __filename = fileURLToPath(import.meta.url);
+const execAsync = promisify(exec);
 export const STATES = Object.freeze({
   IDLE: 'IDLE' as WhatsAppState,
   INITIALIZING: 'INITIALIZING' as WhatsAppState,
@@ -40,6 +43,7 @@ class WhatsAppService {
   private contactNameMap = new Map<string, string>();
   private isSyncingPhonebook = false;
   private cacheCleanupInterval: ReturnType<typeof setInterval> | null = null;
+  private watchdogInterval: ReturnType<typeof setInterval> | null = null;
   private readonly MAX_CACHE_SIZE = 1000;
   private readonly MAX_CONTACT_MAP_SIZE = 5000;
 
@@ -76,8 +80,8 @@ class WhatsAppService {
     const authPath = path.resolve(path.dirname(__filename), '../../.wwebjs_auth');
     const cachePath = path.resolve(path.dirname(__filename), '../../.wwebjs_cache');
     
-    // Kill zombie browser processes first
-    this.killZombieBrowsers();
+    // Kill zombie browser processes first (assíncrono — não bloqueia o loop)
+    await this.killZombieBrowsers();
     
     // Remove lock files before deleting directory
     const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
@@ -103,17 +107,18 @@ class WhatsAppService {
   }
 
   /** Kill zombie Chrome/Chromium processes spawned by whatsapp-web.js ONLY.
-   *  Scoping by the session dir avoids killing the user's own browser. */
-  private killZombieBrowsers(): void {
+   *  Scoping by the session dir avoids killing the user's own browser.
+   *  Assíncrono (exec com timeout): antes usava execSync e bloqueava o event
+   *  loop por até 5s dentro do fluxo de auth_failure/restart. */
+  private async killZombieBrowsers(): Promise<void> {
     try {
       const platform = process.platform;
-      // Security fix: Use safer commands with timeout to prevent command injection
       if (platform === 'win32') {
-        execSync('taskkill /F /IM chrome.exe /T 2>nul', { stdio: 'ignore', timeout: 5000 });
-        execSync('taskkill /F /IM chromium.exe /T 2>nul', { stdio: 'ignore', timeout: 5000 });
+        await execAsync('taskkill /F /IM chrome.exe /T 2>nul', { timeout: 5000 }).catch(() => {});
+        await execAsync('taskkill /F /IM chromium.exe /T 2>nul', { timeout: 5000 }).catch(() => {});
       } else {
         // Only processes whose command line references our auth/session dir.
-        execSync("pkill -9 -f '\\.wwebjs_auth' 2>/dev/null || true", { stdio: 'ignore', timeout: 5000 });
+        await execAsync("pkill -9 -f '\\.wwebjs_auth'", { timeout: 5000 }).catch(() => {});
       }
       logger.info('Zombie browser processes cleaned');
     } catch (err) {
@@ -133,6 +138,8 @@ class WhatsAppService {
     
     // Start cache cleanup interval
     this.startCacheCleanup();
+    // Watchdog: detecta sessão presa que não emite 'disconnected'
+    this.startWatchdog();
 
     if (delay > 0) {
       logger.info({ delayMs: delay }, 'Waiting before init...');
@@ -186,14 +193,16 @@ class WhatsAppService {
       logger.error({ error: errorStr }, 'WhatsApp init failed');
 
       // Retry policy (session-preserving):
-      // 1st/2nd failure -> retry WITHOUT clearing. Transient errors during
-      //                    hot-reloads (TargetCloseError, browser/profile
-      //                    conflicts) are common and must NOT log the user out.
-      // 3rd failure     -> clear the session and retry once (truly broken session).
+      // 1st..4th failure -> retry WITHOUT clearing. Transient errors during
+      //                     hot-reloads (TargetCloseError, browser/profile
+      //                     conflicts) are common and must NOT log the user out.
+      // 5th failure      -> clear the session and retry once (truly broken).
+      // (Antes: limpava já na 3ª falha — ~15s de instabilidade derrubavam a
+      // sessão e forçavam novo QR manual, tirando o atendimento do ar.)
       const attempt = this.reconnectAttempts ?? 0;
-      if (attempt < 3) {
-        if (attempt === 2) {
-          logger.warn('Init failed repeatedly — clearing session and retrying (last resort)...');
+      if (attempt < 5) {
+        if (attempt === 4) {
+          logger.warn('Init failed repeatedly (5x) — clearing session and retrying (last resort)...');
           await this.clearSession();
         } else {
           logger.warn('Init failed — retrying WITHOUT clearing session (transient error)...');
@@ -228,6 +237,10 @@ class WhatsAppService {
         this.lastQR = null;
         this.reconnectAttempts = 0;
         this.setState(STATES.READY);
+        // Links de avatar expiram entre sessões — invalida para rebuscar.
+        clearAvatarCache();
+        // O "Use here" já cumpriu o papel — para o loop de 2s.
+        if (this.useHereInterval) { clearInterval(this.useHereInterval); this.useHereInterval = null; }
         this.emit('whatsapp-ready');
         this.syncPhonebookContacts().catch(() => {});
         try {
@@ -302,6 +315,36 @@ class WhatsAppService {
     });
   }
 
+  /** Watchdog periódico: detecta sessão presa (Chrome travado sem emitir
+   *  'disconnected' ou presa fora de CONNECTED) e reinicializa o cliente. */
+  private startWatchdog(): void {
+    if (this.watchdogInterval) return;
+    this.watchdogInterval = setInterval(async () => {
+      if (this.state !== STATES.READY || !this.client || this.isInitializing) return;
+      try {
+        const state = await Promise.race([
+          this.client.getState(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('watchdog timeout')), 15_000)
+          ),
+        ]);
+        if (state !== 'CONNECTED') {
+          logger.warn({ state }, 'Watchdog: cliente não está CONNECTED — reinicializando');
+          await this.destroy();
+          this.scheduleReconnect();
+        }
+      } catch (err) {
+        logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          'Watchdog: getState falhou — reinicializando'
+        );
+        await this.destroy();
+        this.scheduleReconnect();
+      }
+    }, 5 * 60 * 1000);
+    this.watchdogInterval.unref?.();
+  }
+
   private scheduleReconnect(): void {
     const backoff = Math.min(300000, 3000 * Math.pow(2, this.reconnectAttempts++));
     logger.info({ backoffMs: backoff }, 'Scheduling reconnect');
@@ -336,6 +379,7 @@ class WhatsAppService {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.useHereInterval) { clearInterval(this.useHereInterval); this.useHereInterval = null; }
     if (this.cacheCleanupInterval) { clearInterval(this.cacheCleanupInterval); this.cacheCleanupInterval = null; }
+    if (this.watchdogInterval) { clearInterval(this.watchdogInterval); this.watchdogInterval = null; }
     if (this.client) {
       try {
         this.client.removeAllListeners();

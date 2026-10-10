@@ -7,6 +7,7 @@ import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
 import logger from '../../utils/logger.js';
+import { maskDocument } from '../../utils/redact.js';
 
 export interface PixResult {
   pixUrl: string;
@@ -77,6 +78,33 @@ export async function extractCpfFromPage(page: Page): Promise<string> {
   });
 }
 
+/** Rotação de screenshots de debug: mantém os 100 mais novos e apaga >7 dias. */
+export function pruneDebugScreenshots(debugDir: string): void {
+  try {
+    const MAX_FILES = 100;
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const files = fs
+      .readdirSync(debugDir)
+      .filter((f) => f.endsWith('.png'))
+      .map((f) => {
+        const full = path.join(debugDir, f);
+        let mtime = 0;
+        try { mtime = fs.statSync(full).mtimeMs; } catch { /* ignora */ }
+        return { full, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (let i = 0; i < files.length; i++) {
+      const { full, mtime } = files[i];
+      if (i >= MAX_FILES || (mtime > 0 && now - mtime > MAX_AGE_MS)) {
+        try { fs.unlinkSync(full); } catch { /* ignora */ }
+      }
+    }
+  } catch {
+    // rotação é best-effort — nunca quebra o fluxo de PIX
+  }
+}
+
 /** Process PIX from boleto: navigate to page and extract code */
 export async function processPixPayment(
   browser: Browser,
@@ -109,7 +137,8 @@ export async function processPixPayment(
 
       const scrapedCpf = await extractCpfFromPage(payPage);
       if (scrapedCpf) {
-        logger.info({ cpf: scrapedCpf }, 'CPF scraped from PIX page');
+        // LGPD: nunca logar CPF cru (a página pode expor o CPF completo)
+        logger.info({ cpf: maskDocument(scrapedCpf) }, 'CPF scraped from PIX page');
       }
     } catch (err) {
       logger.error(
@@ -118,13 +147,14 @@ export async function processPixPayment(
       );
     }
 
-    // Screenshot for debugging
+    // Screenshot for debugging (retenção: últimos 100 arquivos / 7 dias)
     const debugDir = path.join(process.cwd(), 'debug');
     if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
     const qrCodePath = path.join(debugDir, `qrcode_${Date.now()}.png`);
 
     try {
       await payPage.screenshot({ path: qrCodePath });
+      pruneDebugScreenshots(debugDir);
     } catch (err) {
       logger.warn(
         { error: err instanceof Error ? err.message : String(err) },

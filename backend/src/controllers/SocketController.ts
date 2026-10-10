@@ -125,7 +125,8 @@ function safeEmit(socket: AthinaSocket, event: keyof ServerToClientEvents, data?
 
 // ─── SocketController ────────────────────────────────────────────────────────
 class SocketController {
-  private isAudioModeActive = false;
+  // Modo áudio POR SOCKET: o toggle de um operador não muda o envio dos demais.
+  private audioModeSockets = new Set<string>();
   private io: AthinaServer;
 
   constructor(io: AthinaServer) {
@@ -239,8 +240,9 @@ class SocketController {
         logger.warn({ socketId: socket.id }, 'Invalid toggle-audio-mode payload');
         return;
       }
-      this.isAudioModeActive = enabled;
-      logger.info({ enabled }, 'Audio mode toggled');
+      if (enabled) this.audioModeSockets.add(socket.id);
+      else this.audioModeSockets.delete(socket.id);
+      logger.info({ enabled, socketId: socket.id }, 'Audio mode toggled');
     });
 
     // ─── TTS Generation ────────────────────────────────────────────────────
@@ -394,6 +396,7 @@ class SocketController {
       ttsRateLimiter.cleanup(socket.id);
       paymobiRateLimiter.cleanup(socket.id);
       avatarRateLimiter.cleanup(socket.id);
+      this.audioModeSockets.delete(socket.id);
     });
   }
 
@@ -431,7 +434,7 @@ class SocketController {
   }
 
   private async handleSendReply(
-    _socket: AthinaSocket,
+    socket: AthinaSocket,
     data: SendReplyPayload
   ): Promise<void> {
     try {
@@ -454,7 +457,7 @@ class SocketController {
       // (asteriscos literais no WhatsApp e na fala do TTS) e mascara CPF.
       const safeText = sanitizeForWhatsApp(data.text);
       if (isReady && client) {
-        if (this.isAudioModeActive) {
+        if (this.audioModeSockets.has(socket.id)) {
           logger.info({ to: data.to, textLength: safeText.length }, 'Audio mode: synthesizing speech');
           try {
             const base64 = await generateTTS(safeText);
@@ -472,6 +475,10 @@ class SocketController {
         await client.sendMessage(data.to, safeText, {
           ...(data.quotedMessageId ? { quotedMessageId: data.quotedMessageId } : {}),
         });
+      } else {
+        // Antes: descarte silencioso (a resposta sumia sem aviso). Agora o
+        // painel recebe um evento e pode avisar/reenfileirar o operador.
+        safeEmit(socket, 'send-failed', { to: data.to, reason: 'whatsapp-not-ready' });
       }
     } catch (error) {
       logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error sending reply');
@@ -496,7 +503,7 @@ class SocketController {
     data: SpellingRequestPayload
   ): Promise<void> {
     try {
-      const systemInstruction = 'Você é o revisor ortográfico e sintático oficial da inteligência artificial Athina. Sua única e exclusiva tarefa é revisar o texto digitado pelo operador para que ele seja ideal para síntese de voz (TTS) em português brasileiro. Siga rigidamente as seguintes diretrizes: 1. Adicione acentuação correta a todas as palavras. 2. Insira pontuação natural e fluida. 3. Corrija a ortografia sem formalizar excessivamente o texto. 4. Responda APENAS com o texto corrigido pronto para fala. Nunca adicione explicações.';
+      const systemInstruction = 'Você é o revisor ortográfico e sintático oficial da inteligência artificial Athina. Sua única e exclusiva tarefa é revisar o texto digitado pelo operador para que ele seja ideal para síntese de voz (TTS) em português brasileiro. Siga rigidamente as seguintes diretrizes: 1. Adicione acentuação correta a todas as palavras. 2. Insira pontuação natural e fluida. 3. Corrija a ortografia sem formalizar excessivamente o texto. 4. Escreva números, valores (R$ 89,90 vira \"oitenta e nove reais e noventa centavos\"), datas (05/11/2026 vira \"cinco de novembro de dois mil e vinte e seis\") e horários por extenso; \"24x\" vira \"vinte e quatro vezes\". 5. Remova emojis, asteriscos e qualquer marcação — o texto será FALADO, não exibido. 6. Não inclua códigos PIX copia-e-cola no texto de fala. 7. Frases curtas, próprias para leitura em voz alta. 8. Responda APENAS com o texto corrigido pronto para fala. Nunca adicione explicações.';
       const reply = await aiService.call({
         model: data.model || 'nvidia/nemotron-3.5-lightning-30b-a3b',
         persona: systemInstruction,
