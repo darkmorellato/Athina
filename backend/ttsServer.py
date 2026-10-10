@@ -84,7 +84,9 @@ PREMIUM_FUNCTIONS = {
 PREMIUM_VOICES = {
     "riva": ("chatterbox", "Chatterbox-Multilingual.pt-BR.Male"),
     "riva_male": ("chatterbox", "Chatterbox-Multilingual.pt-BR.Male"),
-    "riva_female": ("chatterbox", "Chatterbox-Multilingual.pt-BR.Female"),
+    # Chatterbox feminina não existe no deployment — aponta para a Magpie
+    # feminina para não cair silenciosamente numa voz masculina.
+    "riva_female": ("magpie", "Magpie-Multilingual.PT-BR.Isabela"),
     "magpie_louise": ("magpie", "Magpie-Multilingual.PT-BR.Louise"),
     "magpie_isabela": ("magpie", "Magpie-Multilingual.PT-BR.Isabela"),
     "magpie_diego": ("magpie", "Magpie-Multilingual.PT-BR.Diego"),
@@ -152,7 +154,7 @@ def _riva_synthesize(text, voice):
             )
             print(f"[TTS-Server] Premium ok ({provider}, voz: {candidate})")
             samples = np.frombuffer(resp.audio, dtype="<i2").astype("float32") / 32768.0
-            return samples, RIVA_SAMPLE_RATE_HZ
+            return samples, RIVA_SAMPLE_RATE_HZ, candidate
         except Exception as e:  # try next voice
             last_error = e
             print(f"[TTS-Server] Voz '{candidate}' falhou: {e}")
@@ -238,8 +240,13 @@ class TTSHandler(BaseHTTPRequestHandler):
             if not text:
                 self._reply_json(400, {"success": False, "error": "Texto vazio apos normalizacao"})
                 return
+            truncated = False
             if len(text) > MAX_TEXT_CHARS:
-                text = text[:MAX_TEXT_CHARS]
+                # Corta na última fronteira de frase (antes: corte seco no meio
+                # da palavra, sem aviso) e sinaliza 'truncated' no JSON.
+                cut = text.rfind(".", 0, MAX_TEXT_CHARS)
+                text = text[: cut + 1] if cut > MAX_TEXT_CHARS * 0.5 else text[:MAX_TEXT_CHARS]
+                truncated = True
 
             voice = str(payload.get("voice", "pf_dora"))
             try:
@@ -256,7 +263,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             # ── Providers premium: NVIDIA Chatterbox / Magpie ──────────────
             if voice in PREMIUM_VOICES or voice.startswith("Chatterbox-") or voice.startswith("Magpie-Multilingual."):
                 try:
-                    samples, sample_rate = _riva_synthesize(text, voice)
+                    samples, sample_rate, used_voice = _riva_synthesize(text, voice)
                     fd, temp_filename = tempfile.mkstemp(prefix="local_tts_", suffix=f".{output_format}", dir=TEMP_DIR)
                     os.close(fd)
                     if output_format == "ogg":
@@ -270,6 +277,7 @@ class TTSHandler(BaseHTTPRequestHandler):
                         "filePath": os.path.abspath(temp_filename),
                         "durationMs": duration,
                         "provider": "riva",
+                        "voiceUsed": used_voice,
                     })
                     _cleanup_old_temp_files()
                     return
@@ -294,6 +302,10 @@ class TTSHandler(BaseHTTPRequestHandler):
                         voice=voice,
                         speed=speed,
                         lang=lang,
+                        # Pausas um pouco maiores que o default (0.25/0.10) para
+                        # respiro natural entre frases de atendimento.
+                        sentence_pause=0.35,
+                        clause_pause=0.12,
                     )
             except Exception as e:
                 print(f"[TTS-Server] Erro na geracao: {e}")
@@ -320,6 +332,9 @@ class TTSHandler(BaseHTTPRequestHandler):
                 "success": True,
                 "filePath": os.path.abspath(temp_filename),
                 "durationMs": duration,
+                "provider": "kokoro",
+                "voiceUsed": voice,
+                **({"truncated": True} if truncated else {}),
             })
 
             _cleanup_old_temp_files()

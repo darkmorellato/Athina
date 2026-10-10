@@ -59,6 +59,12 @@ Escaneie o QR Code exibido no painel com o WhatsApp do número de atendimento. P
 
 No modo autônomo o agente usa **tool-calling**: consulta o contrato no Paymobi (CPF ou IMEI) e responde com parcela, vencimento, valor e **código PIX copia-e-cola**.
 
+## 🔒 Segurança do painel
+
+- O handshake do Socket.IO é autenticado: com `ADMIN_SECRET` definido no `backend/.env`, o painel precisa do token para conectar — defina uma vez no console do navegador: `localStorage.setItem('athina_admin_token', '<ADMIN_SECRET>')`. Sem `ADMIN_SECRET`, apenas conexões da própria máquina (loopback) são aceitas.
+- `/live` responde sempre 200 enquanto o processo vive (use em supervisores — reconexão do WhatsApp **não** deve reiniciar o serviço); `/health` continua com o detalhe de prontidão.
+- `TRUST_PROXY=<n>` habilita rate limit por IP atrás de reverse proxy (0 = exposto direto). Em produção, defina também `NODE_ENV` e `ALLOWED_ORIGIN`.
+
 ## 🎓 Treinamento de respostas
 
 - Base de conhecimento única: **SQLite local** (`backend/data/athina.db`, via `node:sqlite` nativo) — regras operacionais + exemplos reais de perguntas e respostas. O antigo `backend/learning_database.json` é **importado automaticamente na primeira execução** e fica no repo como arquivo-fonte histórico
@@ -74,11 +80,14 @@ Para adicionar conhecimento: use o painel (aba Treinamento) com novas regras e p
 | Voz | Origem | Sexo | Como usar |
 |-----|--------|------|-----------|
 | 🌸 Dora (BR) | **Kokoro local** (grátis, ONNX) | feminina | padrão do painel |
+| 🎙️ Alex (BR) | **Kokoro local** (grátis, ONNX) | masculina | painel → `pm_alex` |
 | ⚡ Chatterbox Masc (BR) | **NVIDIA Chatterbox** (premium) | masculina | painel → `riva_male` |
 | ✨ Louise (BR) | **NVIDIA Magpie** (premium) | feminina | painel → `magpie_louise` |
 | ✨ Isabela (BR) | **NVIDIA Magpie** (premium) | feminina | painel → `magpie_isabela` |
 
 Se o Chatterbox/Magpie falhar (sem chave, nuvem fora), o servidor cai **automaticamente** para o Kokoro local — o cliente sempre recebe áudio. Amostras: `backend/debug/*.ogg`.
+
+**Normalização pt-BR para fala**: antes da síntese, `backend/tts_normalize.py` expande o texto para fala natural — `R$ 1.234,56` → "mil duzentos e trinta e quatro reais e cinquenta e seis centavos", CPF/CNPJ/IMEI dígito a dígito, datas com mês, emojis/markdown/códigos PIX removidos (testes: `backend/.venv/bin/python backend/tests/test_tts_normalize.py`). A resposta do `/tts` inclui `provider` e `voiceUsed`; `"normalize": false` desliga a normalização (depuração).
 
 Notas: o Chatterbox hosted expõe apenas voz masculina em pt-BR (clonagem zero-shot é rejeitada pelo servidor); as vozes femininas premium são da Magpie. Cota da NVIDIA NIM: limite de taxa por modelo não publicado (varia com o tráfego geral), visível só na web UI do build.nvidia.com — exceder retorna 429.
 

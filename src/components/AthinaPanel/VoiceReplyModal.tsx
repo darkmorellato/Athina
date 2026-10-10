@@ -100,6 +100,7 @@ export function VoiceReplyModal({
               className="w-full bg-slate-950/60 border border-slate-800/70 rounded-xl pl-3 pr-8 py-2 text-xs text-slate-300 focus:outline-hidden focus:border-indigo-500/50 appearance-none cursor-pointer"
             >
               <option value="pf_dora">🌸 Dora (BR · local)</option>
+              <option value="pm_alex">🎙️ Alex (BR · local)</option>
               <option value="riva_male">⚡ Chatterbox Masculina (BR · NVIDIA)</option>
               <option value="magpie_diego">⚡ Diego Masculina (BR · NVIDIA)</option>
               <option value="magpie_louise">✨ Louise Feminina (BR · NVIDIA)</option>

@@ -24,7 +24,9 @@ export async function generateTTS(text: string, voice?: string): Promise<string>
           format: 'ogg',
           speed: 0.92
         },
-        { timeout: 30000 }
+        // 120s: textos longos levam dezenas de segundos no Kokoro
+        // (~5x tempo real) e estouravam o timeout antigo de 30s.
+        { timeout: 120_000 }
       );
 
       if (response.data?.success && response.data.filePath) {

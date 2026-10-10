@@ -41,6 +41,8 @@ _DIGIT_WORDS = {
 # Siglas escritas de forma que o espeak as leia como palavra/pt-BR.
 _LEXICON = [
     (re.compile(r"\bPIX\b", re.IGNORECASE), "pix"),
+    (re.compile(r"\bsites\b", re.IGNORECASE), "sáites"),
+    (re.compile(r"\bsite\b", re.IGNORECASE), "sáite"),
     (re.compile(r"\bWhatsApp\b", re.IGNORECASE), "Uatsapi"),
     (re.compile(r"\bWhats\b", re.IGNORECASE), "Uats"),
     (re.compile(r"\bnº\b", re.IGNORECASE), "número"),

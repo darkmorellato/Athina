@@ -133,6 +133,12 @@ CASES: list[tuple[str, str, list[str], list[str]]] = [
         ["menos", "mil setecentos"],
     ),
     (
+        "acesse o site e o app",
+        "léxico site/app",
+        ["sáite"],
+        [],
+    ),
+    (
         "50% de desconto",
         "porcentagem",
         ["cinquenta por cento"],
