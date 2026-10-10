@@ -123,9 +123,9 @@
   --wa-meta: rgba(0, 0, 0, 0.6);
   --wa-read: #007bfc;
   --wa-tray: #f7f5f3;
-  --wa-accent: #24d366;
+  --wa-accent: #1daa61;
   --wa-icon: rgba(0, 0, 0, 0.75);
-  --wa-quote-line: #24d366;
+  --wa-quote-line: #1daa61;
   --wa-shadow: 0 1px 0.5px rgba(11, 20, 26, 0.13);
   font-family: 'Roboto', 'Helvetica Neue', Helvetica, 'Noto Sans', system-ui, -apple-system,
     sans-serif;
@@ -698,4 +698,46 @@
 }
 .wa-emoji-btn:hover {
   background: rgba(0, 0, 0, 0.06);
+}
+
+/* Recibo de leitura: ✓✓ azul (token --WDS-content-read do WhatsApp) */
+.wa-tick-read {
+  color: var(--wa-read);
+}
+
+/* Botão "ir para o fim" (aparece quando o usuário rola para cima) */
+.wa-fab {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 1px 3px rgba(11, 20, 26, 0.25);
+  color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 15;
+}
+.wa-fab:hover {
+  background: #f7f5f3;
+}
+.wa-fab-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9999px;
+  background: var(--wa-accent);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
 }

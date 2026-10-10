@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { memo, useState, useMemo, useCallback } from 'react';
 import { Brain, BarChart3, MessageSquare, Search } from 'lucide-react';
 import { ContactList } from './ContactList.tsx';
 import { ChatView } from './ChatView.tsx';
@@ -43,7 +43,7 @@ interface WhatsAppPanelProps {
   sendImage: (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption: string) => void;
 }
 
-export default function WhatsAppPanel({
+function WhatsAppPanel({
   isConnected, qrCodeData, statusMessage, messages,
   chatList, historyMeta, onLoadOlder,
   isAgentTyping,
@@ -68,6 +68,12 @@ export default function WhatsAppPanel({
     setInputValue('');
     setReplyTo(null);
   }, [inputValue, selectedContact, sendReply, setInputValue, activeReplyTo]);
+
+  /** Carrega mensagens anteriores (identidade estável — a prop inline
+   *  quebrava o memo do ChatView e re-renderizava a conversa a cada tecla). */
+  const handleLoadOlder = useCallback(() => {
+    if (selectedContact) onLoadOlder(selectedContact);
+  }, [selectedContact, onLoadOlder]);
 
   /** Inicia reply citando uma mensagem real do WhatsApp (tem serializedId) */
   const handleReplyMessage = useCallback(
@@ -245,9 +251,13 @@ export default function WhatsAppPanel({
                 <div className="relative flex-1">
                   <input
                     type="text"
+                    aria-label="Buscar conversa"
                     placeholder="Buscar conversa pelo nome ou número..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') setSearchQuery('');
+                    }}
                     className="w-full bg-white pl-8 pr-3 py-1.5 rounded-xl text-[11px] border border-gray-300
                       focus:outline-hidden focus:ring-1 focus:ring-emerald-500 focus:border-emerald-500
                       transition-all font-semibold text-gray-700 placeholder-gray-400 shadow-xs"
@@ -267,7 +277,7 @@ export default function WhatsAppPanel({
                 isAgentTyping={isAgentTyping}
                 hasMore={selectedMeta?.hasMore ?? false}
                 isLoadingOlder={selectedMeta?.loading ?? false}
-                onLoadOlder={() => selectedContact && onLoadOlder(selectedContact)} />
+                onLoadOlder={handleLoadOlder} />
               {selectedContact && (
                 <MessageInput value={inputValue} onChange={setInputValue}
                   onSend={handleSendMessage}
@@ -289,3 +299,5 @@ export default function WhatsAppPanel({
     </div>
   );
 }
+
+export default memo(WhatsAppPanel);

@@ -51,6 +51,7 @@ export function setupSocketEvents(
   const {
     handleMessage,
     handleAIResponse,
+    handleMessageAck,
     handlePaymobiResult,
     handlePaymobiError,
   } = createSocketHandlers(socket, handlers);
@@ -108,6 +109,17 @@ export function setupSocketEvents(
   socket.on('paymobi-error', handlePaymobiError);
   socket.on('chats-loaded', handleChatsLoaded);
   socket.on('chat-history-loaded', handleChatHistoryLoaded);
+  socket.on('message-ack', handleMessageAck);
+
+  // Envio recusado (WhatsApp não está pronto): avisa o operador no console
+  // do painel em vez do antigo descarte silencioso.
+  const handleSendFailed = (data: { to: string; reason: string }): void => {
+    handlers.addLog(
+      `⚠️ Mensagem para ${String(data?.to ?? '').split('@')[0]} NÃO foi enviada (WhatsApp indisponível — verifique a conexão).`,
+      'error'
+    );
+  };
+  socket.on('send-failed', handleSendFailed);
 
   // Cleanup function
   return () => {
@@ -128,5 +140,7 @@ export function setupSocketEvents(
     socket.off('paymobi-error', handlePaymobiError);
     socket.off('chats-loaded', handleChatsLoaded);
     socket.off('chat-history-loaded', handleChatHistoryLoaded);
+    socket.off('message-ack', handleMessageAck);
+    socket.off('send-failed', handleSendFailed);
   };
 }

@@ -7,7 +7,7 @@ import { memo } from 'react';
 import type { ReactNode } from 'react';
 import { Reply } from 'lucide-react';
 import type { Message } from '../../types/index.js';
-import { DoubleCheckIcon } from './icons.js';
+import { CheckIcon, ClockIcon, DoubleCheckIcon } from './icons.js';
 import { VoiceNotePlayer } from './VoiceNotePlayer.js';
 
 /**
@@ -59,7 +59,18 @@ export const MessageBubble = memo(function MessageBubble({
         : 'file';
 
   const hidden = lastInGroup ? '' : ' wa-meta-hidden';
-  const tick = !isCustomer ? <DoubleCheckIcon className="wa-tick" /> : null;
+  // Recibo como no WhatsApp: 🕓 pendente → ✓ enviado → ✓✓ entregue (cinza)
+  // → ✓✓ LIDO (azul). Sem ack (histórico antigo), mantém ✓✓ cinza.
+  const ack = typeof msg.ack === 'number' ? msg.ack : undefined;
+  const tick = !isCustomer ? (
+    ack === 0 ? (
+      <ClockIcon className="wa-tick" />
+    ) : ack === 1 ? (
+      <CheckIcon className="wa-tick" />
+    ) : (
+      <DoubleCheckIcon className={`wa-tick${ack !== undefined && ack >= 3 ? ' wa-tick-read' : ''}`} />
+    )
+  ) : null;
 
   const metaInline = (
     <span className={`wa-meta${hidden}`} aria-hidden={!lastInGroup}>

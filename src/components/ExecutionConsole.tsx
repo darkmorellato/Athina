@@ -19,20 +19,23 @@ const LOG_COLORS: Record<AgentLog['type'], string> = {
 };
 
 export function ExecutionConsole({ logs, isAgentTyping, onClear }: ExecutionConsoleProps) {
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
 
+  // Rola SÓ o próprio console (scrollIntoView rolava também os ancestrais,
+  // "pulando" o painel a cada log). Sem smooth: comportamento de terminal.
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [logs]);
 
   return (
     <div className="flex-1 flex flex-col gap-3 min-h-[180px] border-t border-slate-800/50 pt-6">
       <div className="flex items-center justify-between">
-        <label className="text-[10px] uppercase font-bold text-slate-500
+        <span className="text-[10px] uppercase font-bold text-slate-500
           tracking-widest flex items-center gap-2">
           <Activity size={12} className="text-emerald-400" />
           Consola de Execução
-        </label>
+        </span>
         <div className="flex gap-3 items-center">
           {isAgentTyping && (
             <span className="text-[9px] text-indigo-400 font-bold animate-pulse
@@ -52,7 +55,7 @@ export function ExecutionConsole({ logs, isAgentTyping, onClear }: ExecutionCons
         </div>
       </div>
 
-      <div className="flex-1 bg-black/30 backdrop-blur-xs rounded-2xl p-4
+      <div ref={boxRef} className="flex-1 bg-black/30 backdrop-blur-xs rounded-2xl p-4
         font-mono text-[10px] overflow-y-auto border border-slate-800/50
         shadow-inner custom-scrollbar">
         {logs.length === 0 && (
@@ -67,7 +70,6 @@ export function ExecutionConsole({ logs, isAgentTyping, onClear }: ExecutionCons
             <span className={`leading-relaxed ${LOG_COLORS[log.type]}`}>{log.text}</span>
           </div>
         ))}
-        <div ref={logsEndRef} />
       </div>
     </div>
   );

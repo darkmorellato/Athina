@@ -1,10 +1,12 @@
 /**
  * @fileoverview Contact list sidebar component.
  * Virtualized (windowing) to handle thousands of contacts smoothly.
+ * Acessível por teclado (listbox/option) e com a paleta de avatar do WA.
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { MessageCircle } from 'lucide-react';
 import type { Contact } from '../types/index.js';
+import { avatarColorFor } from './waAvatarColors.js';
 
 const ITEM_HEIGHT = 80;
 const OVERSCAN = 6;
@@ -21,7 +23,7 @@ interface ContactListProps {
   onRequestAvatars?: (jids: string[]) => void;
 }
 
-export function ContactList({
+export const ContactList = memo(function ContactList({
   contacts,
   selectedContact,
   onSelectContact,
@@ -96,6 +98,8 @@ export function ContactList({
     <div
       ref={containerRef}
       onScroll={handleScroll}
+      role="listbox"
+      aria-label="Conversas"
       className="flex-1 overflow-y-auto custom-scrollbar relative"
     >
       {start > 0 && <div style={{ height: start * ITEM_HEIGHT }} aria-hidden />}
@@ -111,7 +115,7 @@ export function ContactList({
       {end < total && <div style={{ height: (total - end) * ITEM_HEIGHT }} aria-hidden />}
     </div>
   );
-}
+});
 
 interface ContactItemProps {
   contact: Contact;
@@ -124,19 +128,35 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
   // Se a URL da foto falhar ao carregar, volta para a letra (fallback)
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const showPhoto = Boolean(avatarUrl) && failedUrl !== avatarUrl;
+
+  // Teclado: Enter/Espaço selecionam (antes só o mouse funcionava)
+  const handleKeyDown = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onClick();
+    }
+  };
+
   return (
     <div
       onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role="option"
+      aria-selected={isSelected}
+      aria-label={contact.name}
+      tabIndex={0}
       style={{ height: ITEM_HEIGHT }}
       className={`flex items-center gap-3 px-4 box-border cursor-pointer hover:bg-gray-50
         border-b border-gray-50 transition-colors overflow-hidden
+        focus:outline-hidden focus-visible:bg-[#f0f2f5]
         ${isSelected ? 'bg-[#f0f2f5]' : ''}
         ${contact.isHostile ? 'border-l-4 border-red-500' : ''}`}
     >
-      {/* Avatar: foto de perfil do WhatsApp ou letra (fallback) */}
+      {/* Avatar: foto de perfil do WhatsApp ou letra (fallback com a paleta
+          oficial de cores do WA — ver waAvatarColors.ts) */}
       <div className={`w-12 h-12 rounded-full flex items-center justify-center
         font-bold shrink-0 shadow-xs overflow-hidden
-        ${contact.isHostile ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'}`}>
+        ${contact.isHostile ? 'bg-red-100 text-red-600' : avatarColorFor(contact.id)}`}>
         {showPhoto ? (
           <img
             src={avatarUrl as string}

@@ -12,6 +12,7 @@ import { promisify } from 'util';
 import logger from '../utils/logger.js';
 import chatStateService from './ChatStateService.js';
 import { setupClientEvents, startUseHereAutomation, PUPPETEER_ARGS } from './helpers/whatsappClientSetup.js';
+import type { AckMessageLike } from './helpers/whatsappClientSetup.js';
 import { getRecentChats } from './helpers/whatsappChatHelper.js';
 import { syncPhonebookContacts } from './helpers/whatsappPhonebookHelper.js';
 import { handleIncomingMessage } from './helpers/whatsappMessageHelper.js';
@@ -286,6 +287,12 @@ class WhatsAppService {
       },
       onLoading: (percent: number, message: string) => {
         this.emit('server-status', `A carregar: ${percent}% - ${message}`);
+      },
+      onMessageAck: (msg: AckMessageLike, ack: number) => {
+        const serialized = msg?.id?._serialized ?? msg?.id?.id;
+        if (typeof serialized === 'string' && serialized) {
+          this.emit('message-ack', { id: serialized, ack: Number(ack) || 0 });
+        }
       },
       onMessage: (msg: any) => {
         // Mensagem do CLIENTE → rearma o reinício automático (5 min de

@@ -63,6 +63,8 @@ export const waMessageSchema = z.object({
   timestamp: z.number().optional(),
   /** id SERIALIZADO no formato do WhatsApp (necessário para citar/responder) */
   serializedId: z.string().optional(),
+  /** Recibo de entrega (0 pendente .. 3 lido) — atualizado por 'message-ack' */
+  ack: z.number().optional(),
   /** Mensagem citada (reply) quando esta mensagem é uma resposta */
   quoted: z.object({ body: z.string(), fromMe: z.boolean() }).optional(),
 });
@@ -86,6 +88,8 @@ export interface ChatMessage {
   mediaData?: string;
   serializedId?: string;
   quoted?: { body: string; fromMe: boolean };
+  /** Recibo de entrega do WhatsApp (0 pendente, 1 enviado, 2 entregue, 3 lido, 4 tocado) */
+  ack?: number;
 }
 
 /** Conversa carregada em lote (evento 'chats-loaded'). */
@@ -232,6 +236,8 @@ export interface ServerToClientEvents {
   'whatsapp-ready': () => void;
   'whatsapp-disconnected': () => void;
   'whatsapp-message': (msg: WAMessage) => void;
+  /** Atualização do recibo de entrega de uma mensagem (por id serializado) */
+  'message-ack': (data: { id: string; ack: number }) => void;
   'chats-loaded': (chats: LoadedChat[]) => void;
   'chat-history-loaded': (data: {
     chatId: string;

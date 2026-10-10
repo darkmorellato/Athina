@@ -75,7 +75,15 @@ export function createSocketHandlers(
       sender: msg.sender || 'customer',
       fromId: contactId,
       fromName: contactName,
-      time: formatTime(),
+      // Hora do RELÓGIO DO WHATSAPP (timestamp), não do momento do handler —
+      // mensagens atrasadas/reprocessadas mostravam hora errada.
+      time:
+        typeof msg.timestamp === 'number' && msg.timestamp > 0
+          ? new Date(msg.timestamp * 1000).toLocaleTimeString('pt-BR', {
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+          : formatTime(),
       // O painel ordena por timestamp — sem ele a mensagem era classificada
       // como "a mais antiga" (0) e ia para o TOPO do chat, fora da vista
       // (o usuário só via tudo ao trocar de conversa e voltar, quando o
@@ -88,6 +96,8 @@ export function createSocketHandlers(
       mediaMimeType: msg.mediaMimeType,
       serializedId: msg.serializedId,
       quoted: msg.quoted,
+      // Recibo inicial (1 = enviado); atualizado depois por 'message-ack'.
+      ...(typeof msg.ack === 'number' ? { ack: msg.ack } : {}),
     };
 
     setMessages((prev) => {
@@ -230,9 +240,27 @@ export function createSocketHandlers(
     handlePaymobiError(paymobiCtx, data);
   };
 
+  /** Atualiza o recibo (ticks) de uma mensagem pelo id serializado do WhatsApp. */
+  const handleMessageAck = (data: { id: string; ack: number }): void => {
+    if (!data?.id) return;
+    setMessages((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        const isTarget = (m.serializedId && m.serializedId === data.id) || m.id === data.id;
+        if (isTarget && m.ack !== data.ack) {
+          changed = true;
+          return { ...m, ack: data.ack };
+        }
+        return m;
+      });
+      return changed ? next : prev;
+    });
+  };
+
   return {
     handleMessage,
     handleAIResponse,
+    handleMessageAck,
     handlePaymobiResult: onPaymobiResult,
     handlePaymobiError: onPaymobiError,
   };

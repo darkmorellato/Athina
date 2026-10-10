@@ -49,3 +49,15 @@ export function PauseIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+/** Relógio de "pendente" (mensagem enviada, ainda sem ✓) — como no WhatsApp. */
+export function ClockIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 16 16" width={15} height={15} aria-hidden {...props}>
+      <path
+        fill="currentColor"
+        d="M8 1.2A6.8 6.8 0 1 0 14.8 8 6.808 6.808 0 0 0 8 1.2zm0 12.2A5.4 5.4 0 1 1 13.4 8 5.406 5.406 0 0 1 8 13.4zm.75-8.55h-1.5v3.9l3.05 1.83.75-1.25-2.3-1.38z"
+      />
+    </svg>
+  );
+}

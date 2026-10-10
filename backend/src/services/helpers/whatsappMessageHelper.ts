@@ -98,5 +98,6 @@ export async function handleIncomingMessage(
     mediaData,
     mediaMimeType,
     ...(mediaOmitted ? { mediaOmitted: true } : {}),
+    ...(typeof msg.ack === 'number' ? { ack: msg.ack } : {}),
   });
 }

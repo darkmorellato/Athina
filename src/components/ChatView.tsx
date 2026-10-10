@@ -1,12 +1,15 @@
 /**
  * @fileoverview Conversa com aparência idêntica ao WhatsApp Web (tema claro):
  * cabeçalho da conversa, separadores de data, agrupamento de bolhas e scroll.
+ * UX de scroll como no WhatsApp: autoscroll SÓ quando o usuário está no fim;
+ * lendo o histórico, aparece o botão "ir para o fim" com contador de novas.
  */
-import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { Bot, ChevronUp, Loader2 } from 'lucide-react';
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Bot, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import type { Message } from '../types/index.js';
 import { buildTimeline } from './chat/chatLogic.js';
 import { MessageBubble } from './chat/MessageBubble.js';
+import { avatarPaletteFor } from './waAvatarColors.js';
 
 interface ChatViewProps {
   /** Messages ALREADY filtered for the selected contact (see WhatsAppPanel) */
@@ -38,6 +41,33 @@ export const ChatView = memo(function ChatView({
   const loadingOlderRef = useRef(false);
   const savedScrollHeightRef = useRef(0);
   const prevContactRef = useRef<string | null>(null);
+  /** O usuário está no fim da conversa? (default: sim) */
+  const atBottomRef = useRef(true);
+  const [showFab, setShowFab] = useState(false);
+  const [unseen, setUnseen] = useState(0);
+  const prevCountRef = useRef(0);
+
+  // Hooks incondicionais (antes de qualquer return condicional).
+  // useMemo: o parser de datas/grupos NÃO roda de novo quando só o estado
+  // local (digitando, avatar falhado) muda.
+  const timeline = useMemo(() => buildTimeline(messages), [messages]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    atBottomRef.current = atBottom;
+    setShowFab(!atBottom);
+    if (atBottom) setUnseen(0);
+  }, []);
+
+  const scrollToEnd = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    atBottomRef.current = true;
+    setShowFab(false);
+    setUnseen(0);
+  }, []);
 
   const handleLoadOlder = useCallback(() => {
     const el = scrollRef.current;
@@ -47,19 +77,33 @@ export const ChatView = memo(function ChatView({
     onLoadOlder?.();
   }, [isLoadingOlder, onLoadOlder]);
 
-  // Scroll: preserva a posição ao carregar mensagens anteriores;
-  // caso contrário, mantém a conversa no final (mensagens novas / troca de contato).
+  // Scroll: preserva a posição ao carregar mensagens anteriores; autoscroll SÓ
+  // quando o usuário está no fim (ou trocou de conversa) — como no WhatsApp.
+  // Se ele está lendo o histórico, as mensagens novas viram o contador do
+  // botão "ir para o fim" em vez de arrancar a tela do lugar.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const switched = prevContactRef.current !== selectedContact;
-    if (loadingOlderRef.current && !switched) {
+    if (switched) {
+      el.scrollTop = el.scrollHeight;
+      atBottomRef.current = true;
+      setUnseen(0);
+      setShowFab(false);
+    } else if (loadingOlderRef.current) {
       const delta = el.scrollHeight - savedScrollHeightRef.current;
       el.scrollTop = el.scrollTop + Math.max(delta, 0);
       loadingOlderRef.current = false;
-    } else {
+    } else if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+    } else {
+      const added = messages.length - prevCountRef.current;
+      if (added > 0) {
+        setUnseen((u) => u + added);
+        setShowFab(true);
+      }
     }
+    prevCountRef.current = messages.length;
     prevContactRef.current = selectedContact;
   }, [messages, selectedContact]);
 
@@ -75,14 +119,21 @@ export const ChatView = memo(function ChatView({
 
   // Nome amigável: usa o nome resolvido das mensagens quando disponível
   const contactName = messages[0]?.fromName || selectedContact.split('@')[0];
-  const timeline = buildTimeline(messages);
   const showAvatar = Boolean(avatarUrl) && failedAvatar !== avatarUrl;
+  const avatarPalette = avatarPaletteFor(selectedContact);
 
   return (
     <div className="wa-chat-bg flex-1 flex flex-col relative overflow-hidden">
       {/* Cabeçalho da conversa (tray + avatar + nome, como no WhatsApp) */}
       <header className="wa-chat-header">
-        <div className="wa-chat-avatar">
+        <div
+          className="wa-chat-avatar"
+          style={
+            showAvatar
+              ? undefined
+              : { backgroundColor: avatarPalette.bg, color: avatarPalette.fg }
+          }
+        >
           {showAvatar ? (
             <img
               src={avatarUrl as string}
@@ -96,13 +147,19 @@ export const ChatView = memo(function ChatView({
         </div>
         <div className="flex flex-col min-w-0">
           <h3 className="wa-chat-name truncate">{contactName}</h3>
-          <span className="wa-chat-sub">cliente ativo</span>
+          <span className="wa-chat-sub">{isAgentTyping ? 'digitando…' : 'cliente ativo'}</span>
         </div>
       </header>
 
       {/* Messages — select-text reativa a seleção desativada na raiz (select-none)
           para permitir copiar mensagens (Ctrl+C / Cmd+C), como no WhatsApp */}
-      <div ref={scrollRef} className="wa-scroll select-text">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        role="log"
+        aria-label="Mensagens da conversa"
+        className="wa-scroll select-text"
+      >
         {hasMore && (
           <button
             onClick={handleLoadOlder}
@@ -135,13 +192,15 @@ export const ChatView = memo(function ChatView({
           )
         )}
 
+        {/* "digitando…" como bolha RECEBIDA (branca) — o indicador verde de
+            saída destoava do WhatsApp, que mostra o status no cabeçalho. */}
         {isAgentTyping && (
-          <div className="wa-row wa-row-out wa-row-first">
+          <div className="wa-row wa-row-in wa-row-first">
             <div
-              className="wa-bubble wa-bubble-out wa-bubble-tail-out wa-typing"
+              className="wa-bubble wa-bubble-in wa-bubble-tail-in wa-typing"
               aria-label="Athina está digitando"
             >
-              <span className="wa-tail wa-tail-out" aria-hidden />
+              <span className="wa-tail wa-tail-in" aria-hidden />
               <span className="wa-typing-dot" />
               <span className="wa-typing-dot" style={{ animationDelay: '.15s' }} />
               <span className="wa-typing-dot" style={{ animationDelay: '.3s' }} />
@@ -149,6 +208,22 @@ export const ChatView = memo(function ChatView({
           </div>
         )}
       </div>
+
+      {/* Botão "ir para o fim" com contador de novas (padrão do WhatsApp) */}
+      {showFab && (
+        <button
+          type="button"
+          className="wa-fab"
+          onClick={scrollToEnd}
+          title="Ir para o fim"
+          aria-label="Ir para o fim"
+        >
+          <ChevronDown size={22} />
+          {unseen > 0 && (
+            <span className="wa-fab-badge">{unseen > 99 ? '99+' : unseen}</span>
+          )}
+        </button>
+      )}
     </div>
   );
 });

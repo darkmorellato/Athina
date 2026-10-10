@@ -2,8 +2,10 @@
  *
  * Suporta: texto, COLAGEM de imagem (Ctrl+V/Cmd+V), arrastar-e-soltar e o
  * botão de anexo (+). A legenda da imagem é o texto digitado no campo.
+ * Composer fiel: botão de enviar DENTRO da pílula (como no WA), emoji
+ * inserido na posição do cursor, picker fecha com ESC/clique fora.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plus, Smile, X } from 'lucide-react';
 import type { ReplyTarget } from '../types/index.js';
 import type { SendImageReplyPayload } from '@shared/contracts.js';
@@ -54,6 +56,26 @@ export function MessageInput({
   const [emojiOpen, setEmojiOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const emojiPanelRef = useRef<HTMLDivElement>(null);
+
+  // ESC fecha o picker; clique fora também (padrão do WhatsApp)
+  useEffect(() => {
+    if (!emojiOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setEmojiOpen(false);
+    };
+    const onDown = (e: MouseEvent): void => {
+      if (emojiPanelRef.current && !emojiPanelRef.current.contains(e.target as Node)) {
+        setEmojiOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [emojiOpen]);
 
   const loadFile = (file: File | null | undefined): void => {
     setError(null);
@@ -112,6 +134,24 @@ export function MessageInput({
     onSend();
   };
 
+  /** Insere o emoji NA POSIÇÃO DO CURSOR (antes ia sempre para o fim). */
+  const insertEmoji = (emoji: string): void => {
+    const input = inputRef.current;
+    const start = input?.selectionStart ?? value.length;
+    const end = input?.selectionEnd ?? value.length;
+    const next = value.slice(0, start) + emoji + value.slice(end);
+    onChange(next);
+    requestAnimationFrame(() => {
+      input?.focus();
+      const pos = start + emoji.length;
+      try {
+        input?.setSelectionRange(pos, pos);
+      } catch {
+        /* input sem suporte a seleção — ignora */
+      }
+    });
+  };
+
   const canSend = Boolean(pending) || value.trim().length > 0;
 
   return (
@@ -132,7 +172,7 @@ export function MessageInput({
         <div className="wa-composer-quote">
           <span className="wa-composer-quote-bar" aria-hidden />
           <div className="flex flex-col min-w-0 flex-1">
-            <span className="text-[12.5px] font-semibold text-[#24d366] truncate">
+            <span className="text-[12.5px] font-semibold text-[#1daa61] truncate">
               Respondendo {replyTo.fromName}
             </span>
             <span className="text-[13px] text-black/60 truncate">{replyTo.text}</span>
@@ -194,6 +234,7 @@ export function MessageInput({
           onChange={handleFilePick}
         />
 
+        {/* Pílula com input + emoji + ENVIAR dentro (como no WhatsApp Web) */}
         <div className="wa-composer-pill">
           <input
             ref={inputRef}
@@ -202,38 +243,37 @@ export function MessageInput({
             onChange={(e) => onChange(e.target.value)}
             placeholder={pending ? 'Adicione uma legenda (opcional)' : 'Digite uma mensagem'}
             className="wa-composer-input"
+            aria-label="Digite uma mensagem"
           />
           <button
             type="button"
             className="wa-icon-btn wa-icon-btn-sm"
             title="Emojis"
+            aria-label="Emojis"
             onClick={() => setEmojiOpen((v) => !v)}
           >
             <Smile size={22} />
           </button>
+          <button
+            type="submit"
+            className="wa-icon-btn wa-icon-btn-sm wa-send-btn"
+            disabled={!canSend}
+            title={pending ? 'Enviar imagem' : 'Enviar mensagem'}
+            aria-label={pending ? 'Enviar imagem' : 'Enviar mensagem'}
+          >
+            <SendIcon width={20} height={20} />
+          </button>
         </div>
 
-        <button
-          type="submit"
-          className="wa-icon-btn wa-send-btn"
-          disabled={!canSend}
-          title={pending ? 'Enviar imagem' : 'Enviar mensagem'}
-        >
-          <SendIcon width={22} height={22} />
-        </button>
-
         {emojiOpen && (
-          <div className="wa-emoji-panel">
+          <div className="wa-emoji-panel" ref={emojiPanelRef}>
             {EMOJIS.map((emoji) => (
               <button
                 key={emoji}
                 type="button"
                 className="wa-emoji-btn"
                 onMouseDown={(ev) => ev.preventDefault()}
-                onClick={() => {
-                  onChange(value + emoji);
-                  inputRef.current?.focus();
-                }}
+                onClick={() => insertEmoji(emoji)}
               >
                 {emoji}
               </button>

@@ -4,6 +4,9 @@
 import type { Client } from 'whatsapp-web.js';
 import logger from '../../utils/logger.js';
 
+/** Shape mínimo de mensagem usado no recibo de entrega (substitui `any`). */
+export type AckMessageLike = { id?: { _serialized?: string; id?: string } };
+
 export const PUPPETEER_ARGS = [
   '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
   '--no-first-run', '--no-zygote', '--disable-gpu',
@@ -23,7 +26,7 @@ export function setupClientEvents(
   client: Client,
   handlers: ClientEventHandlers
 ): void {
-  const { onQR, onReady, onAuthenticated, onAuthFailure, onDisconnected, onLoading, onMessage } = handlers;
+  const { onQR, onReady, onAuthenticated, onAuthFailure, onDisconnected, onLoading, onMessage, onMessageAck } = handlers;
 
   client.on('qr', (qr: string) => {
     onQR(qr);
@@ -57,6 +60,11 @@ export function setupClientEvents(
   client.on('message_create', (msg: any) => {
     onMessage?.(msg);
   });
+
+  // Recibo de entrega (✓✓ cinza → azul): dispara a cada mudança de ack.
+  client.on('message_ack', (msg: AckMessageLike, ack: number) => {
+    onMessageAck?.(msg, ack);
+  });
 }
 
 export interface ClientEventHandlers {
@@ -67,6 +75,7 @@ export interface ClientEventHandlers {
   onDisconnected?: (reason: string) => void;
   onLoading?: (percent: number, message: string) => void;
   onMessage?: (msg: any) => void;
+  onMessageAck?: (msg: AckMessageLike, ack: number) => void;
 }
 
 /** Start automation to auto-click "Use here" button */
