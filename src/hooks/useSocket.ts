@@ -200,6 +200,7 @@ export default function useSocket() {
         addLog(`Erro na IA: ${data.message}`, 'error');
       },
       onStats: setStats,
+      onOpsAlert: (data) => addLog(`⚠️ ${data.text}`, data.level === 'error' ? 'error' : 'info'),
       onAgentMode: (data) => {
         setAutoReplyEnabled(Boolean(data?.serverAutoReply));
         if (data?.serverAutoReply) {

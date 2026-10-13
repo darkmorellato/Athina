@@ -305,6 +305,8 @@ export interface ServerToClientEvents {
   'message-ack': (data: { id: string; ack: number }) => void;
   'chats-loaded': (chats: LoadedChat[]) => void;
   'flow-texts': (items: FlowTextItem[]) => void;
+  /** Falha operacional que o operador precisa ver (ex.: transferência não entregue) */
+  'ops-alert': (data: { level: 'error' | 'warn'; text: string }) => void;
   'chat-history-loaded': (data: {
     chatId: string;
     messages: ChatMessage[];

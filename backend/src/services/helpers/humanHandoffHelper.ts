@@ -38,12 +38,13 @@ export async function notifyHumanAgents(
     details: string;
     attachment?: DownloadedMedia;
   }
-): Promise<void> {
+): Promise<{ delivered: number; total: number }> {
   const contacts = config.humanHandoffContacts;
   if (contacts.length === 0) {
     logger.error('[HumanHandoff] HUMAN_HANDOFF_CONTACTS vazio — transferência NÃO notificada a ninguém');
-    return;
+    return { delivered: 0, total: 0 };
   }
+  let delivered = 0;
 
   const text = `🔔 Transferência de atendimento — ${data.reason}\n\n${buildClientBlock(data.client)}\n\n${data.details}`;
 
@@ -59,6 +60,7 @@ export async function notifyHumanAgents(
         const media = new MessageMedia(data.attachment.mimetype, data.attachment.base64);
         await client.sendMessage(resolved._serialized, media);
       }
+      delivered++;
       logger.info({ to: maskPhone(resolved._serialized) }, '[HumanHandoff] Atendente notificado');
     } catch (err) {
       logger.error(
@@ -69,4 +71,5 @@ export async function notifyHumanAgents(
   }
 
   await analyticsService.increment('humanInterventions');
+  return { delivered, total: contacts.length };
 }

@@ -61,6 +61,11 @@ class WhatsAppService {
   getLastQR(): string | null { return this.lastQR; }
   getConnectionStatus(): WhatsAppConnectionStatus { return { state: this.state, isConnected: this.state === STATES.READY, lastQR: this.lastQR }; }
 
+  /** Avisa os operadores no painel (console de execução) sobre falhas operacionais. */
+  alertOperators(text: string): void {
+    this.emit('ops-alert', { level: 'error', text });
+  }
+
   /** Expose client safely for authorized operations (e.g., sending messages). */
   getClient(): WWebClient | null { return this.client; }
 

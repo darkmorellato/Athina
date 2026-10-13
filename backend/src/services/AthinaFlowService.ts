@@ -632,9 +632,17 @@ export class AthinaFlowService {
     const client = whatsAppService.getClient();
     if (!client) {
       logger.warn('[AthinaFlow] WhatsApp client indisponível — transferência não notificada');
+      whatsAppService.alertOperators(`Transferência de ${payload.client.nome} NÃO enviada: WhatsApp indisponível.`);
       return;
     }
-    await notifyHumanAgents(client, payload);
+    const { delivered, total } = await notifyHumanAgents(client, payload);
+    if (delivered < total || total === 0) {
+      whatsAppService.alertOperators(
+        total === 0
+          ? `Transferência de ${payload.client.nome} NÃO enviada: nenhum atendente configurado (HUMAN_HANDOFF_CONTACTS).`
+          : `Transferência de ${payload.client.nome}: ${delivered} de ${total} atendentes notificados. Verifique os logs [HumanHandoff].`
+      );
+    }
   }
 }
 

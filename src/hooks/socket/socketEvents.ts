@@ -19,6 +19,7 @@ export interface SocketEventHandlers {
   onAIResponse: (data: { text: string; contactId: string; isSentDirectly?: boolean }) => void;
   onAIError: (data: { message: string }) => void;
   onStats: (data: AnalyticsStats) => void;
+  onOpsAlert: (data: { level: 'error' | 'warn'; text: string }) => void;
   onAgentMode: (data: { serverAutoReply: boolean }) => void;
   onTrainingData: (data: TrainingData) => void;
   onTrainingUpdated: (data: TrainingData) => void;
@@ -47,7 +48,7 @@ export function setupSocketEvents(
   socket.emit('request-status');
   const {
     onConnect, onDisconnect, onServerStatus, onQR, onReady,
-    onDisconnected, onAIError, onStats, onTrainingData, onTrainingUpdated, onFlowTexts,
+    onDisconnected, onAIError, onStats, onOpsAlert, onTrainingData, onTrainingUpdated, onFlowTexts,
   } = handlers;
 
   const {
@@ -105,6 +106,7 @@ export function setupSocketEvents(
   socket.on('ai-response', handleAIResponse);
   socket.on('ai-error', onAIError);
   socket.on('analytics-stats', onStats);
+  socket.on('ops-alert', onOpsAlert);
   socket.on('agent-mode', handlers.onAgentMode);
   socket.on('training-data', onTrainingData);
   socket.on('flow-texts', onFlowTexts);
@@ -135,6 +137,7 @@ export function setupSocketEvents(
     socket.off('ai-response', handleAIResponse);
     socket.off('ai-error', onAIError);
     socket.off('analytics-stats', onStats);
+    socket.off('ops-alert', onOpsAlert);
     socket.off('agent-mode', handlers.onAgentMode);
     socket.off('training-data', onTrainingData);
     socket.off('flow-texts', onFlowTexts);
