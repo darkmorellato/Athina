@@ -7,8 +7,8 @@ Agente de atendimento automático via WhatsApp para financiamento de celulares *
 ```
 ┌─────────────┐   Socket.IO   ┌──────────────────────────────┐
 │  Painel Web │◄─────────────►│  Backend Node.js/TS (3001)   │
-│ React (5173)│               │  ├─ AgentService (autônomo)  │
-└─────────────┘               │  │    └─ tool: Paymobi/PIX   │
+│ React (5173)│               │  ├─ AthinaFlowService (24/7) │
+└─────────────┘               │  │    └─ roteiro: Paymobi/PIX│
                               │  ├─ WhatsAppService (QR)     │
                               │  └─ TTSService ──► Kokoro    │
                               │        (TTS 5050, pt-BR)     │
@@ -37,7 +37,6 @@ ollama pull qwen3:8b
 #      AI_BASE_URL=http://127.0.0.1:11434/v1
 #      AI_API_KEY=ollama
 #      AI_MODEL=qwen3:8b
-#      AGENT_MODEL=qwen3:8b
 #      AGENT_AUTOREPLY=true
 
 # 5. Ligar tudo (frontend + backend + TTS)
@@ -50,14 +49,11 @@ npm run dev
 
 Escaneie o QR Code exibido no painel com o WhatsApp do número de atendimento. Pronto.
 
-## Modos de operação
+## Atendimento automático
 
-| Modo | Config | Comportamento |
-|------|--------|---------------|
-| **Painel (padrão)** | `AGENT_AUTOREPLY=false` | O painel conduz as respostas; o agente só sugere texto |
-| **Autônomo** | `AGENT_AUTOREPLY=true` | O servidor responde clientes sozinho (24/7, painel fechado ok); o painel entra em modo monitor |
+O único atendimento automático é o roteiro do `workflow athina.excalidraw`, implementado em `backend/src/services/AthinaFlowService.ts` (liga com `AGENT_AUTOREPLY=true`; roda 24/7 no servidor, com o painel fechado — o painel apenas monitora e permite resposta manual do operador, que pausa o robô para aquele contato).
 
-No modo autônomo o agente usa **tool-calling**: consulta o contrato no Paymobi (CPF ou IMEI) e responde com parcela, vencimento, valor e **código PIX copia-e-cola**.
+Fluxo: coleta nome + CPF/IMEI → consulta o contrato no Paymobi → menu (1 pagar boleto/PIX, 2 verificar saldo, 3 celular bloqueado por comprovante, 4 falar com atendente). Transferências notificam os contatos de `HUMAN_HANDOFF_CONTACTS`. O único ponto com IA é a leitura opcional do comprovante: o OCR hospedado da NVIDIA (`AGENT_VISION_MODEL`, padrão `nvidia/nemotron-ocr-v2`) lê o texto e uma regra fixa decide PIX vs. boleto. Não há LLM decidindo respostas.
 
 ## 🔒 Segurança do painel
 
@@ -93,16 +89,15 @@ Notas: o Chatterbox hosted expõe apenas voz masculina em pt-BR (clonagem zero-s
 
 O botão **Ouvir** do painel gera o áudio e tenta tocar automaticamente; se o navegador bloquear o autoplay, o botão **▶ Tocar** aparece e reproduz no clique.
 
-## 📊 Observabilidade e memória (opcionais)
+## 📊 Observabilidade (opcional)
 
-Ambos são **opt-in** — sem as variáveis no `backend/.env` ficam 100% desligados (zero overhead):
+É **opt-in** — sem as variáveis no `backend/.env` ficam 100% desligados (zero overhead):
 
 | Recurso | Como ativar | O que faz |
 | --- | --- | --- |
 | Tracing das decisões do LLM (Langfuse) | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | Exporta cada chamada de LLM (prompt/resposta/tokens) via OpenTelemetry — Langfuse Cloud ou self-host (`LANGFUSE_BASEURL`) |
-| Memória semântica (LanceDB) | `AGENT_SEMANTIC_MEMORY=true` | Grava atendimentos (pergunta→resposta) e injeta os mais similares no prompt; embeddings do NIM (`EMBEDDING_MODEL`, padrão `nvidia/nemotron-3-embed-1b`) |
 
-Smokes: `npx --prefix backend tsx tests/_tracing_smoke.ts` (não precisa de conta) e `tests/_semantic_memory_smoke.ts` (usa a chave do NIM).
+Smoke: `npx --prefix backend tsx tests/_tracing_smoke.ts` (não precisa de conta).
 
 ## Scripts
 
@@ -126,15 +121,19 @@ Smokes: `npx --prefix backend tsx tests/_tracing_smoke.ts` (não precisa de cont
 ## Documentação
 
 - [`shared/contracts.ts`](shared/contracts.ts) — contratos Socket.IO compartilhados painel↔backend (fonte única de eventos e payloads; alias `@shared` nos dois lados)
-- [`MODELOS_IA.md`](MODELOS_IA.md) — escolha de TTS (Kokoro) e LLMs open-source (Qwen3), como configurar, checklist de operação
-- [`STACK_AVALIACAO.md`](STACK_AVALIACAO.md) — frameworks (Electron/Tauri/Rust), atualizações e roadmap de autonomia
-- [`PLANO_MELHORIAS_PRODUCAO.md`](PLANO_MELHORIAS_PRODUCAO.md) — correções de segurança/confiabilidade para produção
-- [`AUDIT_REPORT.md`](AUDIT_REPORT.md) — auditoria inicial
+- [`deploy/athina-backend.service`](deploy/athina-backend.service) — serviço systemd para rodar 24/7
 
 ## Requisitos
 
-- Node.js 24+ (LTS)
+- Node.js 24+ (LTS — ver `.nvmrc`)
 - Python 3.10+ (apenas para o TTS)
-- Redis (opcional — chat state/analytics/filas caem para memória sem ele)
 - Ollama (opcional — modelos locais) ou chave NVIDIA NIM
 - Chrome/Chromium (via Puppeteer, para WhatsApp Web)
+
+## 🏭 Produção
+
+- **Serviço 24/7:** instale `deploy/athina-backend.service` com systemd (`Restart=always`). A sessão do WhatsApp fica em `backend/.wwebjs_auth` — não apague entre reinícios, senão será preciso escanear o QR de novo.
+- **Persistência:** tudo fica em `backend/data/athina.db` (SQLite). Não há Redis.
+- **Retenção de dados (política de 90 dias):** o sistema guarda apenas o estado do atendimento em andamento (expira em 24h), totais agregados sem dados pessoais e a base de treinamento. Não guardamos comprovantes nem o histórico de conversas — o histórico fica no WhatsApp do operador. Números, CPF e IMEI não são gravados na base de aprendizado.
+- **Integração contínua:** `.github/workflows/ci.yml` roda typecheck, lint e testes (frontend e backend) a cada push.
+- **Atendentes humanos:** `HUMAN_HANDOFF_CONTACTS` lista os contatos que recebem as transferências. Se a notificação falhar, o erro aparece no log como `[HumanHandoff]`.

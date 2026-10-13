@@ -49,3 +49,6 @@ backend/data/
 # Artefatos do Playwright
 test-results/
 playwright-report/
+
+# Dados de treinamento legados (migrados para backend/data/athina.db) — contêm dados de clientes
+backend/learning_database.json

@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+      - name: Instalar dependências (frontend)
+        run: npm ci
+      - name: Instalar dependências (backend)
+        run: npm ci --prefix backend
+      - name: Typecheck (frontend)
+        run: npm run typecheck
+      - name: Typecheck (backend)
+        run: npm --prefix backend run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Testes do frontend
+        run: npm run test
+      - name: Testes do backend (fluxo da Athina)
+        run: npm --prefix backend test

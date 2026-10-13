@@ -1,0 +1,29 @@
+# Serviço systemd do backend da Athina (24/7).
+# Instalação (como root):
+#   sudo cp deploy/athina-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now athina-backend
+# Logs:  journalctl -u athina-backend -f
+#
+# Ajuste User/WorkingDirectory/PATH para o usuário e caminho reais do servidor.
+[Unit]
+Description=Athina — backend de atendimento WhatsApp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dark
+WorkingDirectory=/home/dark/Codes/Agent-Athina/backend
+EnvironmentFile=/home/dark/Codes/Agent-Athina/backend/.env
+Environment=NODE_ENV=production
+Environment=PATH=/home/dark/.local/share/fnm/node-versions/v24.21.0/installation/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dark/Codes/Agent-Athina/backend/node_modules/.bin/tsx src/server.ts
+Restart=always
+RestartSec=5
+# Sessão do WhatsApp fica em backend/.wwebjs_auth — não apagar entre reinícios.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
