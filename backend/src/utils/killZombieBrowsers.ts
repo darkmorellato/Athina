@@ -72,7 +72,7 @@ function cleanSessionFiles(): void {
       try {
         fs.unlinkSync(lockFile);
         console.log(`  ✅ Removed: ${path.basename(lockFile)}`);
-      } catch (err) {
+      } catch {
         console.log(`  ⚠️ Could not remove: ${path.basename(lockFile)}`);
       }
     }

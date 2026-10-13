@@ -12,9 +12,9 @@ import config from './config/index.js';
 import whatsAppService from './services/WhatsAppService.js';
 import analyticsService from './services/AnalyticsService.js';
 import chatStateService from './services/ChatStateService.js';
-import redisService from './services/RedisService.js';
 import { closeSharedBrowser } from './services/PaymobiScraperService.js';
 import SocketController from './controllers/SocketController.js';
+import athinaFlowService from './services/AthinaFlowService.js';
 import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import logger from './utils/logger.js';
 import { initLlmTracing } from './services/llmTracer.js';
@@ -143,7 +143,7 @@ async function checkTtsHealth(): Promise<boolean> {
 }
 
 // Liveness para supervisores: SEMPRE responde 200 enquanto o processo vive.
-// Reconexão do WhatsApp/Redis NÃO deve disparar restart do serviço — use este
+// Reconexão do WhatsApp NÃO deve disparar restart do serviço — use este
 // endpoint para "está de pé?" e o /health para "está pronto?".
 app.get('/live', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
@@ -159,17 +159,12 @@ app.get('/health', async (_req, res) => {
         state: whatsAppService.getClientState(),
         healthy: whatsAppService.getClientState() === 'READY',
       },
-      redis: {
-        // Redis is optional (memory fallback) — informational only.
-        connected: redisService.isReady(),
-      },
       tts: {
         url: config.ttsServerUrl,
         healthy: await checkTtsHealth(),
       },
       agent: {
-        autoReply: config.agentAutoReply,
-        model: config.agentModel,
+        autoReply: athinaFlowService.isEnabled(),
         aiBaseUrl: config.aiBaseUrl,
       },
     },
@@ -180,8 +175,7 @@ app.get('/health', async (_req, res) => {
     },
   };
 
-  // Redis is optional (everything falls back to memory) — only an unhealthy
-  // WhatsApp degrades the service.
+  // Só o WhatsApp degradado derruba o status (o estado fica no SQLite local).
   if (!health.services.whatsapp.healthy) {
     health.status = 'degraded';
   }
@@ -201,6 +195,8 @@ server.listen(PORT, async () => {
     analyticsService.getStats().then(() => logger.info('Analytics service ready')),
     chatStateService.cleanup().then(() => logger.info('Chat state service ready')),
   ]).catch(() => {}); // Ignore errors - services will work on-demand
+  // Estados de atendimento expirados (TTL de 24h) são removidos a cada hora.
+  setInterval(() => { void chatStateService.cleanup(); }, 60 * 60 * 1000).unref();
   
   // Initialize WhatsApp
   try {
@@ -233,7 +229,6 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   try {
     await whatsAppService.destroy();
     await closeSharedBrowser();
-    await redisService.disconnect();
   } catch (err) {
     logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Error during shutdown cleanup');
   }

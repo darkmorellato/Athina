@@ -28,6 +28,8 @@ const LEARN_MIN_QUESTION = 5;
 const LEARN_MAX_QUESTION = 300;
 const LEARN_MIN_ANSWER = 10;
 const LEARN_MAX_ANSWER = 1200;
+/** Sequências de dígitos que parecem documento ou telefone (CPF formatado, 11, 14, 15 dígitos). */
+const PII_PATTERN = /\d{3}\.\d{3}\.\d{3}-\d{2}|\b\d{11}\b|\b\d{14}\b|\b\d{15}\b/;
 
 const qaSchema = z.object({
   intent: z.string().min(1).max(120),
@@ -164,6 +166,8 @@ export class TrainingService {
     const a = (answer ?? '').trim();
     if (q.length < LEARN_MIN_QUESTION || q.length > LEARN_MAX_QUESTION) return;
     if (a.length < LEARN_MIN_ANSWER || a.length > LEARN_MAX_ANSWER) return;
+    // LGPD: nunca gravar CPF/CNPJ/IMEI/telefone (pergunta ou resposta) na base de aprendizado.
+    if (PII_PATTERN.test(q) || PII_PATTERN.test(a)) return;
 
     try {
       const key = normalizeKey(q);

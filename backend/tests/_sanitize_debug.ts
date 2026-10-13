@@ -1,5 +1,5 @@
 /** Depura sanitizeForWhatsApp com amostras reais. */
-import { sanitizeForWhatsApp } from '../src/services/AgentService.js';
+import { sanitizeForWhatsApp } from '../src/utils/sanitizeForWhatsApp.js';
 
 const samples = [
   'Verifiquei o CPF **123.456.789-01** (mascarado para proteção).',

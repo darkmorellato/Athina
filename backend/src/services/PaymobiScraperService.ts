@@ -184,6 +184,29 @@ export class PaymobiScraperService {
       const installmentsData = installmentsResponse.data?.result;
       const installments = installmentsData?.installments || [];
 
+      const formatInstallmentDate = (dueDate: unknown): string => {
+        const dStr = String(dueDate);
+        const match = dStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (match) return `${match[3]}/${match[2]}/${match[1]}`;
+        return new Date(dStr as string).toLocaleDateString('pt-BR');
+      };
+      const formatInstallmentValue = (value: unknown): string =>
+        new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value) || 0);
+
+      // Lista completa (pagas e pendentes) — usada no "Verificar Saldo".
+      const installmentSummaries = installments.map((inst: any) => ({
+        numero: String(inst.numberInstallment),
+        vencimento: formatInstallmentDate(inst.dueDate),
+        valor: formatInstallmentValue(inst.value),
+        status: inst.status === 'paid' ? 'Pago' : new Date(inst.dueDate) < new Date() ? 'Em atraso' : 'Aberta',
+      }));
+
+      // Quantidade de parcelas em atraso (não pagas e já vencidas) — distingue
+      // "amarelo" (1 atraso, self-service) de "vermelho" (2+, vai para humano).
+      const overdueCount = installments.filter(
+        (inst: any) => inst.status !== 'paid' && new Date(inst.dueDate) < new Date()
+      ).length;
+
       // Find the first unpaid installment
       const openInstallment = installments.find((inst: any) => inst.status !== 'paid');
 
@@ -191,7 +214,12 @@ export class PaymobiScraperService {
         return {
           success: true,
           message: 'Parabéns! Você está em dia com todas as parcelas!',
-          data: { client: clientData, statusContrato: 'em_dia' }
+          data: {
+            client: clientData,
+            statusContrato: 'em_dia',
+            overdueCount: 0,
+            installments: installmentSummaries,
+          },
         };
       }
 
@@ -214,26 +242,18 @@ export class PaymobiScraperService {
 
       const isAtrasado = new Date(openInstallment.dueDate) < new Date();
 
-      // Format values to currency string
-      const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(openInstallment.value);
-
       return {
         success: true,
         message: 'Boleto/PIX localizado e processado com sucesso.',
         data: {
           client: clientData,
           statusContrato: isAtrasado ? 'atraso' : 'em_dia',
+          overdueCount,
+          installments: installmentSummaries,
           parcela: {
             numero: String(openInstallment.numberInstallment),
-            vencimento: (() => {
-              const dStr = String(openInstallment.dueDate);
-              const match = dStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
-              if (match) {
-                return `${match[3]}/${match[2]}/${match[1]}`;
-              }
-              return new Date(openInstallment.dueDate).toLocaleDateString('pt-BR');
-            })(),
-            valor: formattedValue,
+            vencimento: formatInstallmentDate(openInstallment.dueDate),
+            valor: formatInstallmentValue(openInstallment.value),
             status: openInstallment.status === 'pending' ? 'Aberta' : openInstallment.status,
             boletoUrl: openInstallment.boletoLink || '',
             ...pix,

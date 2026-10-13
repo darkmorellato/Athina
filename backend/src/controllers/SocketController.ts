@@ -12,7 +12,9 @@ import analyticsService from '../services/AnalyticsService.js';
 import trainingService from '../services/TrainingService.js';
 import { PaymobiScraperService } from '../services/PaymobiScraperService.js';
 import { generateTTS } from '../services/TTSService.js';
-import agentService, { sanitizeForWhatsApp } from '../services/AgentService.js';
+import { sanitizeForWhatsApp } from '../utils/sanitizeForWhatsApp.js';
+import athinaFlowService from '../services/AthinaFlowService.js';
+import { listFlowTexts, saveFlowText } from '../services/athinaTexts.js';
 import { handleRequestChatHistory } from '../services/helpers/whatsappChatHelper.js';
 import { resolveAvatars } from '../services/helpers/whatsappAvatarHelper.js';
 import config from '../config/index.js';
@@ -23,8 +25,11 @@ import {
   chatHistorySchema,
   contactIdSchema,
   paymobiConsultSchema,
-  sendImageReplySchema,
+  sendFileReplySchema,
   sendReplySchema,
+  forwardMessageSchema,
+  flowTextUpdateSchema,
+  type ForwardMessagePayload,
   spellingSchema,
   ttsRequestSchema,
   updateChatStateSchema,
@@ -35,7 +40,7 @@ import type {
   ChatHistoryRequestPayload,
   ClientToServerEvents,
   PaymobiConsultPayload,
-  SendImageReplyPayload,
+  SendFileReplyPayload,
   SendReplyPayload,
   ServerToClientEvents,
   SpellingRequestPayload,
@@ -136,7 +141,15 @@ class SocketController {
   registerSocket(socket: AthinaSocket): void {
     safeEmit(socket, 'server-status', whatsAppService.getClientState());
     // Tell the panel whether the autonomous server-side agent is answering customers
-    safeEmit(socket, 'agent-mode', { serverAutoReply: config.agentAutoReply });
+    safeEmit(socket, 'agent-mode', { serverAutoReply: athinaFlowService.isEnabled() });
+
+    // Botão de ativação do painel: liga/desliga o atendimento automático e
+    // sincroniza todos os painéis abertos.
+    socket.on('set-auto-reply', (enabled: unknown) => {
+      if (typeof enabled !== 'boolean') return;
+      athinaFlowService.setEnabled(enabled);
+      this.io.emit('agent-mode', { serverAutoReply: enabled });
+    });
 
     // ─── Training data (persisted in backend/learning_database.json) ───────
     socket.on('update-training-rules', (rules: unknown) => {
@@ -162,6 +175,26 @@ class SocketController {
     socket.on('request-training', () => {
       safeEmit(socket, 'training-data', trainingService.getTraining());
     });
+
+    // ─── Textos editáveis do roteiro da Athina (aba Treinamento) ───────────
+    socket.on('update-flow-text', (data: unknown) => {
+      const parsed = flowTextUpdateSchema.safeParse(data);
+      if (!parsed.success) {
+        logger.warn({ socketId: socket.id }, 'Invalid update-flow-text payload rejected');
+        return;
+      }
+      const saved = saveFlowText(parsed.data.key, parsed.data.text);
+      if (!saved) {
+        logger.warn({ key: parsed.data.key, socketId: socket.id }, 'Unknown flow text key rejected');
+        return;
+      }
+      this.io.emit('flow-texts', listFlowTexts());
+    });
+
+    socket.on('request-flow-texts', () => {
+      safeEmit(socket, 'flow-texts', listFlowTexts());
+    });
+    safeEmit(socket, 'flow-texts', listFlowTexts());
 
     // Send persisted training data immediately so the panel always starts in sync
     safeEmit(socket, 'training-data', trainingService.getTraining());
@@ -198,15 +231,27 @@ class SocketController {
       });
     });
 
-    // ─── Image Reply (imagem colada/arrastada pelo operador) ───────────────
-    socket.on('send-image-reply', (data: unknown) => {
-      const parsed = sendImageReplySchema.safeParse(data);
+    // ─── Encaminhar mensagem existente para outro chat ─────────────────────
+    socket.on('forward-message', (data: unknown) => {
+      const parsed = forwardMessageSchema.safeParse(data);
       if (!parsed.success) {
-        logger.warn({ socketId: socket.id }, 'Invalid send-image-reply payload rejected');
+        logger.warn({ socketId: socket.id }, 'Invalid forward-message payload rejected');
         return;
       }
-      this.handleSendImageReply(parsed.data).catch((err) => {
-        logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Image reply failed');
+      this.handleForwardMessage(socket, parsed.data).catch((err) => {
+        logger.error({ error: err instanceof Error ? err.message : String(err), socketId: socket.id }, 'Unhandled forward-message error');
+      });
+    });
+
+    // ─── Image Reply (imagem colada/arrastada pelo operador) ───────────────
+    socket.on('send-file-reply', (data: unknown) => {
+      const parsed = sendFileReplySchema.safeParse(data);
+      if (!parsed.success) {
+        logger.warn({ socketId: socket.id }, 'Invalid send-file-reply payload rejected');
+        return;
+      }
+      this.handleSendFileReply(parsed.data).catch((err) => {
+        logger.error({ error: err instanceof Error ? err.message : String(err) }, 'File reply failed');
       });
     });
 
@@ -457,19 +502,34 @@ class SocketController {
     }
   }
 
+  private async handleForwardMessage(socket: AthinaSocket, data: ForwardMessagePayload): Promise<void> {
+    const client = whatsAppService.getClient();
+    if (!client || whatsAppService.getClientState() !== 'READY') {
+      safeEmit(socket, 'server-status', 'WhatsApp não está pronto para encaminhar a mensagem.');
+      return;
+    }
+    const original = await client.getMessageById(data.serializedId);
+    if (!original) {
+      safeEmit(socket, 'server-status', 'Não foi possível localizar a mensagem para encaminhar.');
+      return;
+    }
+    await original.forward(data.to);
+    logger.info({ to: data.to }, 'Message forwarded');
+  }
+
   private async handleSendReply(
     socket: AthinaSocket,
     data: SendReplyPayload
   ): Promise<void> {
     try {
-      // O painel assumiu a conversa: pausa o agente autônomo para este contato
-      // (evita respostas duplicadas/conflitantes) …
-      agentService.noteHumanReply(data.to);
+      // O painel assumiu a conversa: pausa o roteiro automático para este
+      // contato (evita respostas duplicadas/conflitantes) …
+      athinaFlowService.noteHumanReply(data.to);
 
       // … e aprende com a resposta humana: pergunta do cliente → resposta
       // aprovada pelo operador entra na base (learning_database.json).
       if (data.isManual) {
-        const question = agentService.getLastInbound(data.to);
+        const question = athinaFlowService.getLastInbound(data.to);
         if (question) {
           trainingService.learnFromExchange(question, data.text);
         }
@@ -541,19 +601,22 @@ class SocketController {
   }
 
   /** Envia imagem (MessageMedia) com legenda opcional para o chat. */
-  private async handleSendImageReply(data: SendImageReplyPayload): Promise<void> {
+  private async handleSendFileReply(data: SendFileReplyPayload): Promise<void> {
     try {
       const client = whatsAppService.getClient();
       if (!client || whatsAppService.getClientState() !== 'READY') {
-        logger.warn({ to: data.to }, 'Image reply ignorado: WhatsApp não está pronto');
+        logger.warn({ to: data.to }, 'File reply ignorado: WhatsApp não está pronto');
         return;
       }
-      const ext = data.mimetype.split('/')[1] || 'jpg';
-      const media = new MessageMedia(data.mimetype, data.base64, `imagem.${ext}`);
-      await client.sendMessage(data.to, media, data.caption ? { caption: data.caption } : {});
-      logger.info({ to: data.to, mimetype: data.mimetype, caption: Boolean(data.caption) }, 'Image reply sent');
+      const media = new MessageMedia(data.mimetype, data.base64, data.filename);
+      const isPlainMedia = data.mimetype.startsWith('image/') || data.mimetype.startsWith('video/');
+      await client.sendMessage(data.to, media, {
+        ...(data.caption ? { caption: data.caption } : {}),
+        ...(isPlainMedia ? {} : { sendMediaAsDocument: true }),
+      });
+      logger.info({ to: data.to, mimetype: data.mimetype, caption: Boolean(data.caption) }, 'File reply sent');
     } catch (error) {
-      logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error sending image reply');
+      logger.error({ error: error instanceof Error ? error.message : String(error) }, 'Error sending file reply');
     }
   }
 

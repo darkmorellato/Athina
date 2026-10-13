@@ -1,13 +1,66 @@
 /**
- * @fileoverview Chat state management service with Redis fallback.
- * Uses an in-memory LRU cache when Redis is unavailable.
- * Security fixes: bounded memory, validated contact IDs, atomic Redis updates.
+ * @fileoverview Estado de atendimento por contato, persistido no SQLite
+ * (TTL de 24h, ids validados, leitura+escrita síncronas por contato).
  */
-import { LRUCache } from 'lru-cache';
-import redisService from './RedisService.js';
+import { getDb } from './db.js';
 import logger from '../utils/logger.js';
 
-export type ChatStage = 'COLLECTING' | 'WAITING_CONFIRMATION';
+export type ChatStage =
+  | 'COLLECTING'
+  | 'WAITING_CONFIRMATION'
+  // ─── Roteiro determinístico 24/7 (AthinaFlowService) ──────────────────────
+  | 'MAIN_MENU'
+  | 'BOLETO_CONFIRM'
+  | 'BOLETO_MULTI_CONFIRM'
+  | 'SALDO_FOLLOWUP'
+  | 'BLOQUEIO_MENU'
+  | 'BLOQUEIO_METODO'
+  | 'WAITING_RECEIPT'
+  | 'HUMAN_TOPIC'
+  | 'HUMAN_TOPIC_CONFIRM';
+
+export interface ChatClientData {
+  nome: string;
+  cpf: string;
+  imei: string;
+  loja: string;
+  contrato: string;
+}
+
+export interface ChatParcelaData {
+  numero: string;
+  vencimento: string;
+  valor: string;
+  status: string;
+  boletoUrl: string;
+  pixUrl: string;
+  pixCode: string;
+  qrCodePath: string;
+  total: number;
+}
+
+export interface ChatInstallmentSummary {
+  numero: string;
+  vencimento: string;
+  valor: string;
+  status: string;
+}
+
+/**
+ * Dados do roteiro determinístico (AthinaFlowService) que precisam sobreviver
+ * entre mensagens: cadastro localizado, parcela em confirmação, método de
+ * pagamento informado no fluxo de bloqueio e assunto digitado para o atendente.
+ */
+export interface ChatFlowData {
+  client?: ChatClientData;
+  statusContrato?: 'em_dia' | 'atraso';
+  /** Quantidade de parcelas em atraso (0 = em dia, 1 = amarelo, 2+ = vermelho). */
+  overdueCount?: number;
+  parcela?: ChatParcelaData;
+  installments?: ChatInstallmentSummary[];
+  bloqueioMetodo?: 'pix' | 'boleto';
+  humanTopic?: string;
+}
 
 export interface ChatState {
   stage: ChatStage;
@@ -18,51 +71,26 @@ export interface ChatState {
    */
   collect?: { name?: string; doc?: string };
   pendingData?: {
-    client: {
-      nome: string;
-      cpf: string;
-      imei: string;
-      loja: string;
-      contrato: string;
-    };
+    client: ChatClientData;
     statusContrato: 'em_dia' | 'atraso';
-    parcela?: {
-      numero: string;
-      vencimento: string;
-      valor: string;
-      status: string;
-      boletoUrl: string;
-      pixUrl: string;
-      pixCode: string;
-      qrCodePath: string;
-      total: number;
-    };
+    parcela?: ChatParcelaData;
   };
+  /** Estado do roteiro determinístico 24/7 (ver ChatFlowData). */
+  flow?: ChatFlowData;
   createdAt: number;
   updatedAt: number;
 }
 
-/** Patch de estado: `pendingData: null` / `collect: null` limpam explicitamente. */
-type ChatStatePatch = Omit<Partial<ChatState>, 'pendingData' | 'collect'> & {
+/** Patch de estado: `pendingData: null` / `collect: null` / `flow: null` limpam explicitamente. */
+type ChatStatePatch = Omit<Partial<ChatState>, 'pendingData' | 'collect' | 'flow'> & {
   pendingData?: ChatState['pendingData'] | null;
   collect?: ChatState['collect'] | null;
+  flow?: ChatState['flow'] | null;
 };
 
-const STATE_PREFIX = 'chat:state:';
-const STATE_TTL_SECONDS = 86400; // 24 hours
-const STATE_TTL_MS = STATE_TTL_SECONDS * 1000;
+const STATE_TTL_MS = 24 * 60 * 60 * 1000;
 
-/**
- * Security fix: Bounded in-memory LRU cache with TTL, preventing unbounded growth.
- * Max 2000 contacts, entries expire after 24h (same as Redis TTL).
- */
-const memoryStates = new LRUCache<string, ChatState>({
-  max: 2000,
-  ttl: STATE_TTL_MS,
-  updateAgeOnGet: true,
-});
-
-/** Security fix: Validate contact IDs to avoid malformed/oversized Redis keys */
+/** Valida o id do contato (tamanho e caracteres) antes de qualquer consulta. */
 function sanitizeContactId(contactId: string): string {
   if (typeof contactId !== 'string') {
     throw new Error('Invalid contactId');
@@ -139,59 +167,30 @@ class ChatStateService {
 
   /** Leitura pura (sem tocar o timer de inatividade). */
   private async readState(id: string): Promise<ChatState | null> {
-    return redisService.safeExecute(
-      async () => {
-        const raw = await redisService.client.get(`${STATE_PREFIX}${id}`);
-        if (!raw) return memoryStates.get(id) ?? null;
-        const parsed = safeParseState(raw);
-        if (parsed) {
-          memoryStates.set(id, parsed);
-        }
-        return parsed ?? memoryStates.get(id) ?? null;
-      },
-      memoryStates.get(id) ?? null // Fallback to memory
-    );
+    return this.readStateSync(id);
+  }
+
+  private readStateSync(id: string): ChatState | null {
+    const row = getDb()
+      .prepare('SELECT state, expires_at FROM chat_states WHERE contact_id = ?')
+      .get(id) as { state: string; expires_at: number } | undefined;
+    if (!row || row.expires_at <= Date.now()) return null;
+    return safeParseState(row.state);
   }
 
   /**
-   * Set or update the state for a chat contact.
-   * Security fix: Atomic read-modify-write with Redis WATCH/MULTI/EXEC retry loop.
+   * Leitura + escrita SÍNCRONAS no SQLite: não há await entre as duas, então
+   * duas mensagens do mesmo cliente não sobrescrevem uma à outra.
    */
   async setState(contactId: string, state: ChatStatePatch): Promise<void> {
     const id = sanitizeContactId(contactId);
-    const key = `${STATE_PREFIX}${id}`;
-
-    await redisService.safeExecute(
-      async () => {
-        const maxRetries = 5;
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-          await redisService.client.watch(key);
-          try {
-            const raw = await redisService.client.get(key);
-            const existing = raw ? safeParseState(raw) : memoryStates.get(id) ?? null;
-            const newState = this.buildState(existing, state);
-
-            const multi = redisService.client.multi();
-            multi.setex(key, STATE_TTL_SECONDS, JSON.stringify(newState));
-            const execResult = await multi.exec();
-
-            if (execResult !== null) {
-              memoryStates.set(id, newState);
-              return;
-            }
-            // execResult === null means transaction aborted (concurrent write) — retry
-          } finally {
-            await redisService.client.unwatch().catch(() => {});
-          }
-        }
-        logger.warn({ contactId: id }, 'Chat state update failed after max retries');
-      },
-      undefined
-    );
-
-    // Always update memory fallback, even without Redis
-    const existing = memoryStates.get(id) ?? null;
-    memoryStates.set(id, this.buildState(existing, state));
+    const next = this.buildState(this.readStateSync(id), state);
+    getDb()
+      .prepare(
+        `INSERT INTO chat_states (contact_id, state, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(contact_id) DO UPDATE SET state = excluded.state, expires_at = excluded.expires_at`
+      )
+      .run(id, JSON.stringify(next), Date.now() + STATE_TTL_MS);
   }
 
   private buildState(existing: ChatState | null, state: ChatStatePatch): ChatState {
@@ -200,10 +199,12 @@ class ChatStateService {
     // pendingData antigo (nome/CPF/PIX do cliente) por tempo indeterminado.
     const pendingDataCleared = 'pendingData' in state;
     const collectCleared = 'collect' in state;
+    const flowCleared = 'flow' in state;
     return {
       stage: state.stage ?? existing?.stage ?? 'COLLECTING',
       collect: collectCleared ? state.collect ?? undefined : existing?.collect,
       pendingData: pendingDataCleared ? state.pendingData ?? undefined : existing?.pendingData,
+      flow: flowCleared ? state.flow ?? undefined : existing?.flow,
       createdAt: existing?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
     };
@@ -211,9 +212,18 @@ class ChatStateService {
 
   /**
    * Reset a chat to the collecting stage.
+   * Mantém `collect` de propósito (comportamento já existente, usado pelo
+   * painel) — só `pendingData` é limpo aqui. Use `resetFlowState` para um
+   * reinício completo (também limpa `collect`/`flow`), usado no fim de cada
+   * ramo terminal do roteiro determinístico 24/7.
    */
   async resetState(contactId: string): Promise<void> {
     await this.setState(contactId, { stage: 'COLLECTING', pendingData: null });
+  }
+
+  /** Reinício completo (coleta + confirmação + roteiro) — ver resetState. */
+  async resetFlowState(contactId: string): Promise<void> {
+    await this.setState(contactId, { stage: 'COLLECTING', pendingData: null, collect: null, flow: null });
   }
 
   /**
@@ -223,41 +233,22 @@ class ChatStateService {
     await this.setState(contactId, { stage: 'WAITING_CONFIRMATION', pendingData });
   }
 
-  /**
-   * Delete state for a contact.
-   */
-  async deleteState(contactId: string): Promise<void> {
-    const id = sanitizeContactId(contactId);
-    memoryStates.delete(id);
-
-    await redisService.safeExecute(
-      async () => {
-        await redisService.client.del(`${STATE_PREFIX}${id}`);
-      },
-      undefined
-    );
+  /** Transição do roteiro determinístico 24/7 — grava estágio + dados do fluxo. */
+  async setFlowState(contactId: string, stage: ChatStage, flow: ChatFlowData | null): Promise<void> {
+    await this.setState(contactId, { stage, flow });
   }
 
-  /**
-   * Clean up expired states (called periodically).
-   * Security fix: Uses SCAN with cursor instead of blocking KEYS command.
-   */
+  /** Remove o estado de um contato. */
+  async deleteState(contactId: string): Promise<void> {
+    const id = sanitizeContactId(contactId);
+    getDb().prepare('DELETE FROM chat_states WHERE contact_id = ?').run(id);
+  }
+
+  /** Apaga estados expirados (TTL de 24h). Chamado no boot e periodicamente. */
   async cleanup(): Promise<void> {
-    await redisService.safeExecute(
-      async () => {
-        let cursor = '0';
-        let count = 0;
-        do {
-          const [nextCursor, keys] = await redisService.client.scan(cursor, 'MATCH', `${STATE_PREFIX}*`, 'COUNT', 100);
-          cursor = nextCursor;
-          count += keys.length;
-        } while (cursor !== '0');
-        if (count > 0) {
-          logger.info({ count }, 'Chat states in Redis');
-        }
-      },
-      undefined
-    );
+    const result = getDb().prepare('DELETE FROM chat_states WHERE expires_at <= ?').run(Date.now());
+    const removed = Number(result.changes ?? 0);
+    if (removed > 0) logger.info({ removed }, 'Estados de atendimento expirados removidos');
   }
 }
 

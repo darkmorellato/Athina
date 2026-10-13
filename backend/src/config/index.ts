@@ -20,8 +20,6 @@ loadEnv({ path: path.resolve(process.cwd(), 'backend/.env'), quiet: true });
 const envSchema = z.object({
   PORT: z.coerce.number().default(3001),
   NVIDIA_API_KEY: z.string().optional(),
-  REDIS_HOST: z.string().default('127.0.0.1'),
-  REDIS_PORT: z.coerce.number().default(6379),
   PAYMOBI_EMAIL: z.string().optional(),
   PAYMOBI_PASSWORD: z.string().optional(),
   PAYMOBI_LOGIN_URL: z
@@ -44,8 +42,15 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === 'true' || v === '1'),
-  AGENT_MODEL: z.string().optional(),
-  AGENT_MAX_STEPS: z.coerce.number().min(1).max(10).default(5),
+  // Modelo de OCR hospedado da NVIDIA (https://ai.api.nvidia.com/v1/cv/<modelo>,
+  // autenticado com NVIDIA_API_KEY/AI_API_KEY) usado para ler o comprovante de
+  // pagamento (PIX vs. boleto) no fluxo de "celular bloqueado". Vazio = a
+  // análise automática fica desativada e o comprovante só é encaminhado ao
+  // atendente humano, sem classificação.
+  AGENT_VISION_MODEL: z.string().optional(),
+  // Contatos humanos (WhatsApp) que recebem a transferência de atendimento —
+  // dígitos com DDI+DDD separados por vírgula, ex.: "5519989354849,5519990151809".
+  HUMAN_HANDOFF_CONTACTS: z.string().optional(),
   // Local TTS server (Kokoro ONNX)
   TTS_SERVER_URL: z.string().url().default('http://127.0.0.1:5050'),
   // Reverse proxy hops para o rate limit por IP (0 = exposição direta)
@@ -71,8 +76,6 @@ const DEFAULT_NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 const configObj = {
   port: env.PORT,
   nvidiaApiKey: env.NVIDIA_API_KEY ?? null,
-  redisHost: env.REDIS_HOST,
-  redisPort: env.REDIS_PORT,
   paymobiEmail: env.PAYMOBI_EMAIL ?? null,
   paymobiPassword: env.PAYMOBI_PASSWORD ?? null,
   paymobiLoginUrl: env.PAYMOBI_LOGIN_URL,
@@ -87,11 +90,12 @@ const configObj = {
   aiApiKey: env.AI_API_KEY ?? env.NVIDIA_API_KEY ?? null,
   aiModel: env.AI_MODEL ?? null,
   agentAutoReply: env.AGENT_AUTOREPLY,
-  agentModel:
-    env.AGENT_MODEL ??
-    env.AI_MODEL ??
-    'deepseek-ai/deepseek-v4.1-flash',
-  agentMaxSteps: env.AGENT_MAX_STEPS,
+  agentVisionModel: env.AGENT_VISION_MODEL ?? 'nvidia/nemotron-ocr-v2',
+  /** Dígitos de contato (sem @c.us) dos atendentes humanos — vazio se não configurado. */
+  humanHandoffContacts: (env.HUMAN_HANDOFF_CONTACTS ?? '')
+    .split(',')
+    .map((s) => s.replace(/\D/g, ''))
+    .filter((s) => s.length >= 10),
   ttsServerUrl: env.TTS_SERVER_URL,
   trustProxy: env.TRUST_PROXY,
 } as const;

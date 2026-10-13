@@ -83,6 +83,14 @@ export interface ParcelaInfo {
   total: number;
 }
 
+/** Resumo de UMA parcela (para a listagem completa de "Verificar Saldo"). */
+export interface InstallmentSummary {
+  numero: string;
+  vencimento: string;
+  valor: string;
+  status: string;
+}
+
 export interface PaymobiResult {
   success: boolean;
   reason?: 'NOT_FOUND' | 'CONTRACT_FINALIZED';
@@ -91,6 +99,10 @@ export interface PaymobiResult {
     client: ClientData;
     statusContrato: 'em_dia' | 'atraso';
     parcela?: ParcelaInfo;
+    /** Quantidade de parcelas em atraso (0 = em dia, 1 = amarelo, 2+ = vermelho). */
+    overdueCount?: number;
+    /** Todas as parcelas do contrato, pagas e pendentes (fluxo "Verificar Saldo"). */
+    installments?: InstallmentSummary[];
   };
 }
 

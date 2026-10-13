@@ -4,7 +4,7 @@
  * Totalmente opt-in: sem `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` no
  * ambiente vira NO-OP (nada é iniciado, nada é exportado, zero overhead).
  * Com as chaves, um LangfuseSpanProcessor global exporta os spans gerados
- * pelo `telemetry` do Vercel AI SDK (ver AIService/AgentService).
+ * pelo `telemetry` do Vercel AI SDK (ver AIService).
  *
  * Env: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (obrigatórias p/ ativar),
  *      LANGFUSE_BASEURL (self-host; padrão = Langfuse Cloud).

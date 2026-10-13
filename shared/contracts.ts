@@ -99,11 +99,26 @@ export interface LoadedChat {
   messages: ChatMessage[];
   /** Não-lidas segundo o WhatsApp (chat.unreadCount) — baseline do badge do painel */
   unreadCount?: number;
+  /** Data (s) da última atividade do chat — define a ordem da lista, como no WhatsApp */
+  timestamp?: number;
 }
 
 // ─── Estado de atendimento (servidor) ────────────────────────────────────────
 
-export const chatStageSchema = z.enum(['COLLECTING', 'WAITING_CONFIRMATION']);
+export const chatStageSchema = z.enum([
+  'COLLECTING',
+  'WAITING_CONFIRMATION',
+  // ─── Roteiro determinístico 24/7 (AthinaFlowService) ───────────────────────
+  'MAIN_MENU',
+  'BOLETO_CONFIRM',
+  'BOLETO_MULTI_CONFIRM',
+  'SALDO_FOLLOWUP',
+  'BLOQUEIO_MENU',
+  'BLOQUEIO_METODO',
+  'WAITING_RECEIPT',
+  'HUMAN_TOPIC',
+  'HUMAN_TOPIC_CONFIRM',
+]);
 export const collectDataSchema = z
   .object({
     name: z.string().max(120).optional(),
@@ -117,6 +132,8 @@ export const chatStateSchema = z.object({
   pendingData: z.any().optional(),
   /** Dados parciais da coleta (nome/CPF-IMEI) por contato */
   collect: collectDataSchema.optional(),
+  /** Campos extras do roteiro determinístico (validados por fora, como pendingData) */
+  flow: z.any().optional(),
 });
 export type ChatState = z.infer<typeof chatStateSchema>;
 
@@ -168,14 +185,53 @@ export const contactIdSchema = z.object({
 });
 export type ContactIdPayload = z.infer<typeof contactIdSchema>;
 
-export const sendImageReplySchema = z.object({
+export const flowTextUpdateSchema = z.object({
+  key: z.string().min(1).max(60),
+  /** Texto vazio = restaura o padrão */
+  text: z.string().max(2000),
+});
+export type FlowTextUpdatePayload = z.infer<typeof flowTextUpdateSchema>;
+
+/** Texto editável de uma etapa do roteiro (aba Treinamento). */
+export interface FlowTextItem {
+  key: string;
+  stage: string;
+  label: string;
+  defaultText: string;
+  placeholders: string[];
+  text: string;
+  isCustom: boolean;
+}
+
+export const forwardMessageSchema = z.object({
+  /** id serializado da mensagem a encaminhar */
+  serializedId: z.string().min(1).max(300),
+  /** chat de destino (id serializado) */
+  to: z.string().min(1).max(100),
+});
+export type ForwardMessagePayload = z.infer<typeof forwardMessageSchema>;
+
+/** Tipos de arquivo aceitos pelo painel (imagem, vídeo e documentos comuns). */
+export const SENDABLE_MIME_TYPES = [
+  'image/jpeg', 'image/png', 'image/webp', 'image/gif',
+  'video/mp4', 'video/3gpp',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain', 'text/csv',
+] as const;
+
+export const sendFileReplySchema = z.object({
   to: z.string().min(1).max(100),
   // base64 de ~15MB binário cabe no maxHttpBufferSize (25MB) com folga
   base64: z.string().min(1).max(20_000_000),
-  mimetype: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+  mimetype: z.enum(SENDABLE_MIME_TYPES),
+  filename: z.string().min(1).max(255),
   caption: z.string().max(1024).optional(),
 });
-export type SendImageReplyPayload = z.infer<typeof sendImageReplySchema>;
+export type SendFileReplyPayload = z.infer<typeof sendFileReplySchema>;
 
 export const avatarsSchema = z.object({
   jids: z.array(z.string().min(3).max(200)).min(1).max(60),
@@ -211,12 +267,17 @@ export interface ClientToServerEvents {
   'request-status': () => void;
   'ai-request': (payload: AIRequestPayload) => void;
   'send-reply': (payload: SendReplyPayload) => void;
-  'send-image-reply': (payload: SendImageReplyPayload) => void;
+  'send-file-reply': (payload: SendFileReplyPayload) => void;
+  'forward-message': (payload: ForwardMessagePayload) => void;
+  'request-flow-texts': () => void;
+  'update-flow-text': (payload: FlowTextUpdatePayload) => void;
   'send-voice-reply': (payload: VoiceReplyPayload) => void;
   'generate-tts-audio': (payload: TtsRequestPayload) => void;
   'correct-spelling': (payload: SpellingRequestPayload) => void;
   'consult-paymobi': (payload: PaymobiConsultPayload) => void;
   'toggle-audio-mode': (enabled: boolean) => void;
+  /** Liga/desliga o atendimento automático (roteiro da Athina) no servidor */
+  'set-auto-reply': (enabled: boolean) => void;
   'restart-whatsapp': () => void;
   'request-training': () => void;
   'update-training-rules': (rules: string[]) => void;
@@ -243,6 +304,7 @@ export interface ServerToClientEvents {
   /** Atualização do recibo de entrega de uma mensagem (por id serializado) */
   'message-ack': (data: { id: string; ack: number }) => void;
   'chats-loaded': (chats: LoadedChat[]) => void;
+  'flow-texts': (items: FlowTextItem[]) => void;
   'chat-history-loaded': (data: {
     chatId: string;
     messages: ChatMessage[];

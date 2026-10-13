@@ -2,6 +2,7 @@
  * @fileoverview Puppeteer launch arguments and event setup for WhatsApp.
  */
 import type { Client } from 'whatsapp-web.js';
+import type { Page } from 'puppeteer';
 import logger from '../../utils/logger.js';
 
 /** Shape mínimo de mensagem usado no recibo de entrega (substitui `any`). */
@@ -82,7 +83,7 @@ export interface ClientEventHandlers {
 export function startUseHereAutomation(client: Client): ReturnType<typeof setInterval> {
   const interval: ReturnType<typeof setInterval> = setInterval(async () => {
     try {
-      const pupPage = (client as unknown as { pupPage?: import('puppeteer').Page }).pupPage;
+      const pupPage = (client as unknown as { pupPage?: Page }).pupPage;
       if (!pupPage) return;
 
       const clicked = await pupPage.evaluate(() => {

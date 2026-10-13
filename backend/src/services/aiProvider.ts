@@ -1,7 +1,7 @@
 /**
  * @fileoverview Provider LLM compartilhado (Vercel AI SDK · OpenAI-compatible).
  * Fonte única: NVIDIA NIM (nuvem, padrão) ou Ollama/llama.cpp/vLLM via AI_BASE_URL.
- * Usado pelo AIService (painel) e pelo AgentService (agente autônomo).
+ * Usado pelo AIService (sugestões do painel).
  */
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import config from '../config/index.js';

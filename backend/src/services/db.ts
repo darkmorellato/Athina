@@ -36,6 +36,17 @@ const SCHEMA = `
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS chat_states (
+    contact_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS chat_states_expires ON chat_states (expires_at);
+  CREATE TABLE IF NOT EXISTS flow_texts (
+    key TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS analytics_intents (
     intent TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 0

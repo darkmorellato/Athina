@@ -2,6 +2,7 @@
  * @fileoverview WhatsApp Web client service using whatsapp-web.js.
  */
 import type { Client as WWebClient } from 'whatsapp-web.js';
+import type { Server as SocketServer } from 'socket.io';
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import path from 'path';
@@ -34,7 +35,7 @@ class WhatsAppService {
   private client: WWebClient | null = null;
   private isInitializing = false;
   private useHereInterval: ReturnType<typeof setInterval> | null = null;
-  private emitter: import('socket.io').Server | null = null;
+  private emitter: SocketServer | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private cachedChats: Array<{ id: string; name: string; messages: any[] }> | null = null;
@@ -50,7 +51,7 @@ class WhatsAppService {
   private readonly MAX_CACHE_SIZE = 1000;
   private readonly MAX_CONTACT_MAP_SIZE = 5000;
 
-  setEmitter(emitter: import('socket.io').Server | null): void { this.emitter = emitter; }
+  setEmitter(emitter: SocketServer | null): void { this.emitter = emitter; }
   private emit(event: string, data?: unknown): void { this.emitter?.emit(event, data); }
   private setState(newState: WhatsAppState): void {
     logger.info({ from: this.state, to: newState }, 'WhatsApp state transition');
@@ -124,7 +125,7 @@ class WhatsAppService {
         await execAsync("pkill -9 -f '\\.wwebjs_auth'", { timeout: 5000 }).catch(() => {});
       }
       logger.info('Zombie browser processes cleaned');
-    } catch (err) {
+    } catch {
       // Ignore - processes may not exist or timeout
       logger.debug('No zombie browser processes found or cleanup timed out');
     }
@@ -272,7 +273,8 @@ class WhatsAppService {
       onAuthFailure: () => {
         this.destroy()
           .then(() => this.clearSession())
-          .then(() => this.scheduleReconnect());
+          .then(() => this.scheduleReconnect())
+          .catch((err) => logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Falha ao reiniciar após auth_failure'));
       },
       onDisconnected: (reason: string) => {
         logger.warn({ reason }, 'WhatsApp disconnected');
@@ -285,7 +287,8 @@ class WhatsAppService {
             }
             return Promise.resolve();
           })
-          .then(() => this.scheduleReconnect());
+          .then(() => this.scheduleReconnect())
+          .catch((err) => logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Falha ao reiniciar após desconexão'));
       },
       onLoading: (percent: number, message: string) => {
         this.emit('server-status', `A carregar: ${percent}% - ${message}`);
@@ -308,15 +311,16 @@ class WhatsAppService {
           }
         }
         handleIncomingMessage(msg, (event, data) => this.emit(event, data)).catch(() => {});
-        // Autonomous server-side auto-reply (enabled via AGENT_AUTOREPLY=true).
-        // Dynamic import avoids a circular dependency between the services.
+        // Atendimento automático (AGENT_AUTOREPLY=true): o roteiro determinístico
+        // (AthinaFlowService) decide a resposta. Dynamic import evita dependência
+        // circular entre os serviços.
         if (msg && msg.fromMe !== true) {
-          import('./AgentService.js')
-            .then(({ default: agentService }) => agentService.handleIncomingMessage(msg))
+          import('./AthinaFlowService.js')
+            .then(({ default: athinaFlowService }) => athinaFlowService.handleIncomingMessage(msg))
             .catch((err) => {
               logger.error(
                 { error: err instanceof Error ? err.message : String(err) },
-                'Failed to dispatch message to autonomous agent'
+                'Failed to dispatch message to the deterministic flow'
               );
             });
         }

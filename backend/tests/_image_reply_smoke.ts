@@ -1,5 +1,5 @@
 /**
- * Smoke test do evento send-image-reply — valida a camada de schema
+ * Smoke test do evento send-file-reply — valida a camada de schema
  * (payloads inválidos são rejeitados sem efeito colateral; NÃO envia
  * imagens reais a clientes).
  *
@@ -17,7 +17,7 @@ socket.on('connect', async () => {
   console.log('conectado');
 
   // 1) mimetype proibido → schema deve rejeitar (sem envio)
-  socket.emit('send-image-reply', {
+  socket.emit('send-file-reply', {
     to: '11111111111@c.us',
     base64: 'aGVsbG8=',
     mimetype: 'application/zip',
@@ -25,7 +25,7 @@ socket.on('connect', async () => {
   });
 
   // 2) base64 vazio → schema deve rejeitar
-  socket.emit('send-image-reply', {
+  socket.emit('send-file-reply', {
     to: '11111111111@c.us',
     base64: '',
     mimetype: 'image/png',
@@ -33,7 +33,7 @@ socket.on('connect', async () => {
 
   // 3) payload bem-formado porém chat inexistente → handler deve falhar
   //    COM GESTÃO de erro (sem derrubar o servidor); nada é entregue a ninguém.
-  socket.emit('send-image-reply', {
+  socket.emit('send-file-reply', {
     to: '00000000000@c.us',
     base64: Buffer.from('fake-imagem').toString('base64'),
     mimetype: 'image/png',
