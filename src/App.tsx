@@ -11,10 +11,10 @@ export default function App() {
   const {
     socket,
     isConnected,
-    isAgentActive,
-    setIsAgentActive,
     audioMode,
     toggleAudioMode,
+    autoReplyEnabled,
+    toggleAutoReply,
     qrCodeData,
     statusMessage,
     messages,
@@ -34,7 +34,10 @@ export default function App() {
     stats,
     trainingData,
     sendReply,
-    sendImage,
+    forwardMessage,
+    flowTexts,
+    updateFlowText,
+    sendFile,
     avatars,
     requestAvatars,
     loadChatHistory,
@@ -80,6 +83,7 @@ export default function App() {
           onLoadOlder={loadOlderMessages}
           isAgentTyping={isAgentTyping}
           sendReply={sendReply}
+          forwardMessage={forwardMessage}
           restartWhatsApp={restartWhatsApp}
           stats={stats}
           refreshStats={refreshStats}
@@ -87,6 +91,8 @@ export default function App() {
           trainingData={trainingData}
           updateTrainingRules={updateTrainingRules}
           updateTrainingQas={updateTrainingQas}
+          flowTexts={flowTexts}
+          updateFlowText={updateFlowText}
           selectedContact={selectedContact}
           setSelectedContact={selectContact}
           unreadCounts={unread.counts}
@@ -95,7 +101,7 @@ export default function App() {
           setInputValue={setInputValue}
           avatars={avatars}
           requestAvatars={requestAvatars}
-          sendImage={sendImage}
+          sendFile={sendFile}
         />
       </div>
 
@@ -110,10 +116,10 @@ export default function App() {
           socket={socket}
           selectedContact={selectedContact}
           isConnected={isConnected}
-          isAgentActive={isAgentActive}
-          setIsAgentActive={setIsAgentActive}
           audioMode={audioMode}
           toggleAudioMode={toggleAudioMode}
+          autoReplyEnabled={autoReplyEnabled}
+          toggleAutoReply={toggleAutoReply}
           selectedModel={selectedModel}
           setSelectedModel={setSelectedModel}
           agentPersona={agentPersona}

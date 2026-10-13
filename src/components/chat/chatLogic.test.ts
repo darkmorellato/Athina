@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-floating-promises -- test() do Vitest é gerenciado pelo runner */
+ 
 /**
  * @fileoverview TDD da lógica pura do chat estilo WhatsApp Web:
  * agrupamento de bolhas, separadores de data e waveform de áudio.

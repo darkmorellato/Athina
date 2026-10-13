@@ -18,10 +18,10 @@ interface AthinaPanelProps {
   socket: Socket | null;
   selectedContact: string | null;
   isConnected: boolean;
-  isAgentActive: boolean;
-  setIsAgentActive: (v: boolean) => void;
   audioMode: boolean;
   toggleAudioMode: (v: boolean) => void;
+  autoReplyEnabled: boolean;
+  toggleAutoReply: (v: boolean) => void;
   selectedModel: string;
   setSelectedModel: (v: string) => void;
   agentPersona: string;
@@ -38,10 +38,10 @@ export default memo(function AthinaPanel({
   socket,
   selectedContact,
   isConnected,
-  isAgentActive,
-  setIsAgentActive,
   audioMode,
   toggleAudioMode,
+  autoReplyEnabled,
+  toggleAutoReply,
   selectedModel,
   setSelectedModel,
   agentPersona,
@@ -110,6 +110,17 @@ export default memo(function AthinaPanel({
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 border-r border-slate-800/60 pr-4 mr-1">
             <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 select-none">
+              🤖 Atendimento Automático
+            </span>
+            <ToggleSwitch
+              active={autoReplyEnabled}
+              color="bg-emerald-500"
+              onClick={() => toggleAutoReply(!autoReplyEnabled)}
+            />
+          </div>
+
+          <div className="flex items-center gap-2 border-r border-slate-800/60 pr-4 mr-1">
+            <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 select-none">
               🎙️ Resposta por Áudio
             </span>
             <ToggleSwitch
@@ -127,12 +138,6 @@ export default memo(function AthinaPanel({
             }`}>
             {isConnected ? 'Bridge Ativa' : 'Desconectado'}
           </div>
-
-          <ToggleSwitch
-            active={isAgentActive}
-            color="bg-emerald-500"
-            onClick={() => setIsAgentActive(!isAgentActive)}
-          />
         </div>
       </div>
 

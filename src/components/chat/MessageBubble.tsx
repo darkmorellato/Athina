@@ -5,25 +5,46 @@
  */
 import { memo } from 'react';
 import type { ReactNode } from 'react';
-import { Reply } from 'lucide-react';
+import { Forward, Reply } from 'lucide-react';
 import type { Message } from '../../types/index.js';
 import { CheckIcon, ClockIcon, DoubleCheckIcon } from './icons.js';
 import { VoiceNotePlayer } from './VoiceNotePlayer.js';
 
+const URL_PATTERN = /(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])/g;
+
+/** Trecho de texto: URLs viram links (nova aba, sem vazar a aba do painel). */
+function renderLinks(text: string, keyPrefix: string): ReactNode[] {
+  return text.split(URL_PATTERN).map((part, i) =>
+    /^https?:\/\//.test(part) ? (
+      <a
+        key={`${keyPrefix}-${i}`}
+        href={part}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[#027eb5] underline break-all"
+      >
+        {part}
+      </a>
+    ) : (
+      part
+    )
+  );
+}
+
 /**
  * Formatação de negrito como no WhatsApp: *texto* (e **texto**, antes da
- * sanitização) vira <strong>. Pares não encontrados ficam intactos.
+ * sanitização) vira <strong>. URLs viram links clicáveis.
  */
 function renderBold(text: string): ReactNode[] {
   const parts = text.split(/(\*\*[^*\n]+\*\*|\*[^*\n]+\*)/g);
-  return parts.map((part, i) => {
+  return parts.flatMap<ReactNode>((part, i) => {
     if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
-      return <strong key={i}>{part.slice(2, -2)}</strong>;
+      return [<strong key={i}>{part.slice(2, -2)}</strong>];
     }
     if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
-      return <strong key={i}>{part.slice(1, -1)}</strong>;
+      return [<strong key={i}>{part.slice(1, -1)}</strong>];
     }
-    return part;
+    return renderLinks(part, `t${i}`);
   });
 }
 
@@ -36,6 +57,7 @@ interface MessageBubbleProps {
   /** Foto do contato (usada no player de voz recebida) */
   avatarUrl?: string | null;
   onReply?: (msg: Message) => void;
+  onForward?: (msg: Message) => void;
 }
 
 export const MessageBubble = memo(function MessageBubble({
@@ -44,6 +66,7 @@ export const MessageBubble = memo(function MessageBubble({
   lastInGroup,
   avatarUrl,
   onReply,
+  onForward,
 }: MessageBubbleProps) {
   const isCustomer = msg.sender === 'customer';
   const canReply = Boolean(onReply && msg.serializedId);
@@ -119,6 +142,17 @@ export const MessageBubble = memo(function MessageBubble({
             className={`wa-reply-btn ${isCustomer ? 'wa-reply-btn-in' : 'wa-reply-btn-out'}`}
           >
             <Reply size={14} />
+          </button>
+        )}
+
+        {canReply && onForward && (
+          <button
+            type="button"
+            title="Encaminhar mensagem"
+            onClick={() => onForward(msg)}
+            className={`wa-reply-btn wa-forward-btn ${isCustomer ? 'wa-reply-btn-in' : 'wa-reply-btn-out'}`}
+          >
+            <Forward size={14} />
           </button>
         )}
 

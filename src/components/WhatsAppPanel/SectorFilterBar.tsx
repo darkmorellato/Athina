@@ -1,7 +1,6 @@
 /**
  * @fileoverview Sector filter bar for contact list.
  */
-import type { SectorFilter } from '../../types/index.js';
 
 type SectorKey = 'all' | 'cobranca' | 'suporte' | 'vendas';
 

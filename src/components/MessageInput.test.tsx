@@ -9,11 +9,11 @@ import { MessageInput } from './MessageInput.js';
 function renderInput(props: Partial<Parameters<typeof MessageInput>[0]> = {}) {
   const onChange = vi.fn();
   const onSend = vi.fn();
-  const onSendImage = vi.fn();
+  const onSendFile = vi.fn();
   const utils = render(
-    <MessageInput value="" onChange={onChange} onSend={onSend} onSendImage={onSendImage} {...props} />
+    <MessageInput value="" onChange={onChange} onSend={onSend} onSendFile={onSendFile} {...props} />
   );
-  return { ...utils, onChange, onSend, onSendImage };
+  return { ...utils, onChange, onSend, onSendFile };
 }
 
 describe('MessageInput (composer estilo WhatsApp)', () => {
@@ -36,23 +36,23 @@ describe('MessageInput (composer estilo WhatsApp)', () => {
     expect(screen.getByTitle('Enviar mensagem')).toBeDisabled();
   });
 
-  it('arquivo não-imagem mostra erro de validação', () => {
+  it('tipo de arquivo não suportado mostra erro de validação', () => {
     const { container } = renderInput();
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = new File(['x'], 'nota.txt', { type: 'text/plain' });
+    const file = new File(['x'], 'programa.exe', { type: 'application/x-msdownload' });
     fireEvent.change(fileInput, { target: { files: [file] } });
-    expect(screen.getByText(/Só imagens/)).toBeInTheDocument();
+    expect(screen.getByText(/Tipo de arquivo não suportado/)).toBeInTheDocument();
   });
 
-  it('imagem válida mostra chip e enviar chama onSendImage com base64 + mime + legenda', async () => {
-    const { container, onSendImage } = renderInput({ value: 'olá' });
+  it('imagem válida mostra chip e enviar chama onSendFile com base64 + mime + nome + legenda', async () => {
+    const { container, onSendFile } = renderInput({ value: 'olá' });
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(['x'], 'foto.png', { type: 'image/png' });
     fireEvent.change(fileInput, { target: { files: [file] } });
 
-    expect(await screen.findByText('Imagem pronta para enviar')).toBeInTheDocument();
-    fireEvent.click(screen.getByTitle('Enviar imagem'));
-    expect(onSendImage).toHaveBeenCalledWith('eA==', 'image/png', 'olá');
+    expect(await screen.findByText('foto.png')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('Enviar arquivo'));
+    expect(onSendFile).toHaveBeenCalledWith('eA==', 'image/png', 'foto.png', 'olá');
   });
 
   it('citação mostra "Respondendo" e cancelar dispara onCancelReply', () => {

@@ -3,6 +3,8 @@
  */
 import { Brain, BookOpen } from 'lucide-react';
 import type { TrainingData } from '../../types/index.js';
+import type { FlowTextItem } from '@shared/contracts.js';
+import { FlowTextsSection } from './FlowTextsSection.js';
 
 import { useState } from 'react';
 
@@ -10,12 +12,16 @@ interface TrainingTabProps {
   trainingData: TrainingData;
   updateTrainingRules: (rules: string[]) => void;
   updateTrainingQas: (qas: TrainingData['qaExamples']) => void;
+  flowTexts: FlowTextItem[];
+  updateFlowText: (key: string, text: string) => void;
 }
 
 export function TrainingTab({
   trainingData,
   updateTrainingRules,
   updateTrainingQas,
+  flowTexts,
+  updateFlowText,
 }: TrainingTabProps) {
   const [newRuleInput, setNewRuleInput] = useState('');
   const [newQaIntent, setNewQaIntent] = useState('');
@@ -192,6 +198,11 @@ export function TrainingTab({
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Workflow da Athina: textos editáveis do roteiro */}
+      <div className="flex-1 flex flex-col overflow-hidden md:max-w-[460px] border-t md:border-t-0 md:border-l border-gray-150 pl-0 md:pl-5">
+        <FlowTextsSection flowTexts={flowTexts} updateFlowText={updateFlowText} />
       </div>
     </div>
   );

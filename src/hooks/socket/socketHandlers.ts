@@ -9,14 +9,11 @@ import {
   playAlertSound,
   buildAIResponseIndex,
   nowTs,
-  cancelHuman,
   waOutbound,
 } from './socketHelpers.js';
-import { handleStageConfirmation, handleStageCollecting } from './stageHandlers.js';
-import { handlePaymobiResult, handlePaymobiError } from './paymobiHandlers.js';
 
 /**
- * Chat states are now managed server-side via Redis.
+ * Chat states are managed server-side (SQLite).
  * This module sends/receives state updates to/from the backend.
  */
 
@@ -24,14 +21,6 @@ import { handlePaymobiResult, handlePaymobiError } from './paymobiHandlers.js';
 const MAX_PROCESSED_IDS = 5000;
 const processedMessageIds = new Set<string>();
 const processedIdOrder: string[] = [];
-
-/**
- * Ouvintes de 'chat-state-loaded' por contato. Sem isto, cada mensagem nova
- * registrava outro ouvinte e os anteriores ainda dentro da janela de 2s
- * reprocessavam a mesma resposta — gerando mensagens duplicadas (ex.:
- * confirmação aparecendo duas vezes).
- */
-const stateWaiters = new Map<string, (data: { contactId: string; state: any }) => void>();
 
 function trackProcessedId(id: string): void {
   if (processedMessageIds.has(id)) return;
@@ -52,8 +41,6 @@ export function createSocketHandlers(
     setMessages,
     setIsAgentTyping,
     quickRepliesRef,
-    isAgentActiveRef,
-    serverAutoReplyRef,
     messagesRef,
   } = handlers;
 
@@ -127,82 +114,6 @@ export function createSocketHandlers(
       addLog(`⚠️ [ALERTA] Mensagem hostil de ${contactName}!`, 'error');
       playAlertSound();
     }
-
-    // Process with AI agent if active (and the server-side autonomous agent is OFF)
-    if (isAgentActiveRef.current && !serverAutoReplyRef.current) {
-      const bodyClean = msg.body.trim();
-      const bodyLower = bodyClean.toLowerCase();
-
-      // Mensagem nova do cliente → cancela respostas ainda agendadas do
-      // contato (nada chega depois de um reinício pedido pelo cliente).
-      cancelHuman(contactId);
-
-      const stageCtx = {
-        socket,
-        contactId,
-        contactName,
-        bodyClean,
-        bodyLower,
-        messagesRef,
-        setMessages,
-        quickRepliesRef,
-        addLog,
-        setIsAgentTyping,
-      };
-
-      // Request current state from backend
-      socket.emit('get-chat-state', { contactId });
-
-      // Listen for state response (one-time)
-      const handleStateLoaded = (data: { contactId: string; state: any }) => {
-        if (data.contactId !== contactId) return;
-        socket.off('chat-state-loaded', handleStateLoaded);
-        if (stateWaiters.get(contactId) === handleStateLoaded) {
-          stateWaiters.delete(contactId);
-        }
-
-        const state = data.state || { stage: 'COLLECTING' };
-
-        if (state.stage === 'WAITING_CONFIRMATION') {
-          // Pass pending data from server state
-          handleStageConfirmation({
-            ...stageCtx,
-            bodyLower,
-            chatStates: { [contactId]: state },
-            saveChatStates: (updated: Record<string, any>) => {
-              const newState = updated[contactId];
-              if (newState) {
-                if (newState.stage === 'WAITING_CONFIRMATION') {
-                  socket.emit('update-chat-state', { contactId, state: newState });
-                } else {
-                  socket.emit('reset-chat-state', { contactId });
-                }
-              }
-            },
-            quickRepliesRef: quickRepliesRef as React.MutableRefObject<string[]>,
-          });
-        } else {
-          // Coleta parcial (nome/CPF) vem do ESTADO DO SERVIDOR por contato
-          // — nunca do histórico de mensagens (misturava dados entre chats).
-          handleStageCollecting({ ...stageCtx, collect: state.collect }, msg as WAMessage);
-        }
-      };
-
-      // Substitui qualquer ouvinte pendente do MESMO contato antes de
-      // registrar (garante processamento único por mensagem).
-      const previousWaiter = stateWaiters.get(contactId);
-      if (previousWaiter) socket.off('chat-state-loaded', previousWaiter);
-      stateWaiters.set(contactId, handleStateLoaded);
-      socket.on('chat-state-loaded', handleStateLoaded);
-
-      // Timeout fallback — if backend doesn't respond in 2s, default to COLLECTING
-      setTimeout(() => {
-        socket.off('chat-state-loaded', handleStateLoaded);
-        if (stateWaiters.get(contactId) === handleStateLoaded) {
-          stateWaiters.delete(contactId);
-        }
-      }, 2000);
-    }
   };
 
   const handleAIResponse = (data: { text: string; contactId: string; isSentDirectly?: boolean }): void => {
@@ -222,26 +133,6 @@ export function createSocketHandlers(
     // Send reply to WhatsApp
     socket.emit('send-reply', { to: data.contactId, text: textToSend });
     addLog(`Resposta enviada para ${data.contactId.split('@')[0]}`, 'success');
-  };
-
-  const onPaymobiResult = (data: { result: any; contactId?: string }): void => {
-    const paymobiCtx = {
-      socket,
-      setMessages,
-      addLog,
-      setIsAgentTyping,
-    };
-    handlePaymobiResult(paymobiCtx, data);
-  };
-
-  const onPaymobiError = (data: { message: string; contactId?: string }): void => {
-    const paymobiCtx = {
-      setMessages,
-      socket,
-      addLog,
-      setIsAgentTyping,
-    };
-    handlePaymobiError(paymobiCtx, data);
   };
 
   /** Atualiza o recibo (ticks) de uma mensagem pelo id serializado do WhatsApp. */
@@ -265,7 +156,5 @@ export function createSocketHandlers(
     handleMessage,
     handleAIResponse,
     handleMessageAck,
-    handlePaymobiResult: onPaymobiResult,
-    handlePaymobiError: onPaymobiError,
   };
 }

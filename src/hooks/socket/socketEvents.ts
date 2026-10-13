@@ -3,8 +3,8 @@
  * Handles all real-time communication with the backend.
  */
 import type { Socket } from 'socket.io-client';
-import type { ClientToServerEvents, LoadedChat, ServerToClientEvents } from '@shared/contracts.js';
-import type { Message, WAMessage, AgentLog } from '../../types/index.js';
+import type { ClientToServerEvents, FlowTextItem, LoadedChat, ServerToClientEvents } from '@shared/contracts.js';
+import type { AgentLog, Message, TrainingData, WAMessage } from '../../types/index.js';
 import type { AnalyticsStats } from '../../types/index.js';
 import { createSocketHandlers } from './socketHandlers.js';
 
@@ -20,8 +20,9 @@ export interface SocketEventHandlers {
   onAIError: (data: { message: string }) => void;
   onStats: (data: AnalyticsStats) => void;
   onAgentMode: (data: { serverAutoReply: boolean }) => void;
-  onTrainingData: (data: import('../../types/index.js').TrainingData) => void;
-  onTrainingUpdated: (data: import('../../types/index.js').TrainingData) => void;
+  onTrainingData: (data: TrainingData) => void;
+  onTrainingUpdated: (data: TrainingData) => void;
+  onFlowTexts: (items: FlowTextItem[]) => void;
   addLog: (text: string, type?: AgentLog['type']) => void;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setChatList: React.Dispatch<React.SetStateAction<Array<{ id: string; name: string }>>>;
@@ -32,8 +33,6 @@ export interface SocketEventHandlers {
   quickRepliesRef: React.MutableRefObject<string[]>;
   agentPersonaRef: React.MutableRefObject<string>;
   selectedModelRef: React.MutableRefObject<string>;
-  isAgentActiveRef: React.MutableRefObject<boolean>;
-  serverAutoReplyRef: React.MutableRefObject<boolean>;
   messagesRef: React.MutableRefObject<Message[]>;
   /** Não-lidas: baseline do backend + mensagens ao vivo (ver unreadLogic.ts) */
   ingestChatsUnread: (chats: Array<{ id: string; unreadCount?: number }>) => void;
@@ -48,20 +47,18 @@ export function setupSocketEvents(
   socket.emit('request-status');
   const {
     onConnect, onDisconnect, onServerStatus, onQR, onReady,
-    onDisconnected, onAIError, onStats, onTrainingData, onTrainingUpdated,
+    onDisconnected, onAIError, onStats, onTrainingData, onTrainingUpdated, onFlowTexts,
   } = handlers;
 
   const {
     handleMessage,
     handleAIResponse,
     handleMessageAck,
-    handlePaymobiResult,
-    handlePaymobiError,
   } = createSocketHandlers(socket, handlers);
 
   const handleChatsLoaded = (loadedChats: LoadedChat[]) => {
     // Lista completa de contatos + conversas (sidebar estilo WhatsApp Web)
-    handlers.setChatList(loadedChats.map((c) => ({ id: c.id, name: c.name })));
+    handlers.setChatList(loadedChats.map((c) => ({ id: c.id, name: c.name, timestamp: c.timestamp })));
 
     // Não-lidas: baseline do WhatsApp (nunca regride a contagem ao vivo)
     handlers.ingestChatsUnread(loadedChats);
@@ -110,9 +107,8 @@ export function setupSocketEvents(
   socket.on('analytics-stats', onStats);
   socket.on('agent-mode', handlers.onAgentMode);
   socket.on('training-data', onTrainingData);
+  socket.on('flow-texts', onFlowTexts);
   socket.on('training-data-updated', onTrainingUpdated);
-  socket.on('paymobi-result', handlePaymobiResult);
-  socket.on('paymobi-error', handlePaymobiError);
   socket.on('chats-loaded', handleChatsLoaded);
   socket.on('chat-history-loaded', handleChatHistoryLoaded);
   socket.on('message-ack', handleMessageAck);
@@ -141,9 +137,8 @@ export function setupSocketEvents(
     socket.off('analytics-stats', onStats);
     socket.off('agent-mode', handlers.onAgentMode);
     socket.off('training-data', onTrainingData);
+    socket.off('flow-texts', onFlowTexts);
     socket.off('training-data-updated', onTrainingUpdated);
-    socket.off('paymobi-result', handlePaymobiResult);
-    socket.off('paymobi-error', handlePaymobiError);
     socket.off('chats-loaded', handleChatsLoaded);
     socket.off('chat-history-loaded', handleChatHistoryLoaded);
     socket.off('message-ack', handleMessageAck);

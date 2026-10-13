@@ -25,6 +25,8 @@ export interface Contact {
   sectorKey: string;
   /** Não-lidas (badge verde na lista, estilo WhatsApp) */
   unread: number;
+  /** Fixada pelo operador (sempre no topo da lista) */
+  pinned?: boolean;
 }
 
 // AI Response Types

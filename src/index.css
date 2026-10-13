@@ -545,6 +545,9 @@
 .wa-row:hover .wa-reply-btn {
   opacity: 1;
 }
+.wa-forward-btn {
+  top: 24px;
+}
 .wa-reply-btn-in {
   left: -13px;
 }

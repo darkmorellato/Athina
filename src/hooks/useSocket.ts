@@ -7,7 +7,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
-import type { ClientToServerEvents, SendImageReplyPayload, ServerToClientEvents } from '@shared/contracts.js';
+import type { ClientToServerEvents, FlowTextItem, SendFileReplyPayload, ServerToClientEvents } from '@shared/contracts.js';
 import {
   DEFAULT_PERSONA,
   DEFAULT_QUICK_REPLIES,
@@ -58,6 +58,8 @@ const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(
 export interface ChatListEntry {
   id: string;
   name: string;
+  /** Última atividade do chat (s) — ordena a lista mesmo sem mensagens carregadas */
+  timestamp?: number;
 }
 
 export interface HistoryMeta {
@@ -72,7 +74,6 @@ const HISTORY_MAX = 120;
 
 export default function useSocket() {
   const [isConnected, setIsConnected] = useState(false);
-  const [isAgentActive, setIsAgentActive] = useState(true);
   const [audioMode, setAudioMode] = useState(false);
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
   const [serverStatus, setServerStatus] = useState<ServerStatus>('connecting');
@@ -84,6 +85,7 @@ export default function useSocket() {
   /** Não-lidas por contato (badge verde + divisória, estilo WhatsApp) */
   const [unread, setUnread] = useState<UnreadState>(EMPTY_UNREAD);
   const [chatList, setChatList] = useState<ChatListEntry[]>([]);
+  const [flowTexts, setFlowTexts] = useState<FlowTextItem[]>([]);
   const [historyMeta, setHistoryMeta] = useState<Record<string, HistoryMeta>>({});
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>(INITIAL_LOGS);
@@ -103,15 +105,15 @@ export default function useSocket() {
   const pendingAvatarsRef = useRef<Set<string>>(new Set());
   const avatarTimerRef = useRef<number | null>(null);
 
+  // Atendimento automático (roteiro da Athina) ligado no servidor?
+  const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
+
   // Refs for live values without re-creating closures
-  const isAgentActiveRef = useRef(isAgentActive);
   const selectedModelRef = useRef(selectedModel);
   const agentPersonaRef = useRef(agentPersona);
   const quickRepliesRef = useRef(quickReplies);
   const messagesRef = useRef(messages);
-  const serverAutoReplyRef = useRef(false);
 
-  useEffect(() => { isAgentActiveRef.current = isAgentActive; }, [isAgentActive]);
   useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
   useEffect(() => { agentPersonaRef.current = agentPersona; }, [agentPersona]);
   useEffect(() => { quickRepliesRef.current = quickReplies; }, [quickReplies]);
@@ -199,12 +201,13 @@ export default function useSocket() {
       },
       onStats: setStats,
       onAgentMode: (data) => {
-        serverAutoReplyRef.current = Boolean(data?.serverAutoReply);
+        setAutoReplyEnabled(Boolean(data?.serverAutoReply));
         if (data?.serverAutoReply) {
           addLog('🤖 Modo autônomo ATIVO no servidor — o painel entra em modo monitor (sem respostas duplicadas).', 'info');
         }
       },
       onTrainingData: (data) => setTrainingData(data ?? { customRules: [], qaExamples: [] }),
+      onFlowTexts: (items) => setFlowTexts(items ?? []),
       onTrainingUpdated: (data) => {
         setTrainingData(data ?? { customRules: [], qaExamples: [] });
         addLog('🧠 Cérebro da Athina atualizado e sincronizado!', 'success');
@@ -219,8 +222,6 @@ export default function useSocket() {
       quickRepliesRef,
       agentPersonaRef,
       selectedModelRef,
-      isAgentActiveRef,
-      serverAutoReplyRef,
       messagesRef,
       socket,
     });
@@ -271,6 +272,14 @@ export default function useSocket() {
     []
   );
 
+  const updateFlowText = useCallback((key: string, text: string) => {
+    socket.emit('update-flow-text', { key, text });
+  }, []);
+
+  const forwardMessage = useCallback((serializedId: string, to: string) => {
+    socket.emit('forward-message', { serializedId, to });
+  }, []);
+
   const loadChatHistory = useCallback((chatId: string) => {
     setHistoryMeta((prev) => ({
       ...prev,
@@ -290,12 +299,13 @@ export default function useSocket() {
   }, []);
 
   /** Envia imagem colada/arrastada como mensagem de WhatsApp (com legenda). */
-  const sendImage = useCallback(
-    (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption = '') => {
-      socket.emit('send-image-reply', {
+  const sendFile = useCallback(
+    (to: string, base64: string, mimetype: SendFileReplyPayload['mimetype'], filename: string, caption = '') => {
+      socket.emit('send-file-reply', {
         to,
         base64,
         mimetype,
+        filename: filename.slice(0, 255),
         caption: caption.slice(0, 1024), // limite de legenda do WhatsApp
       });
     },
@@ -327,6 +337,11 @@ export default function useSocket() {
     socket.emit('get-stats');
   }, []);
 
+  const toggleAutoReply = useCallback((enabled: boolean) => {
+    setAutoReplyEnabled(enabled); // otimista; o servidor confirma via 'agent-mode'
+    socket.emit('set-auto-reply', enabled);
+  }, []);
+
   const resetStats = useCallback(() => {
     socket.emit('reset-stats');
   }, []);
@@ -334,10 +349,10 @@ export default function useSocket() {
   return {
     socket,
     isConnected,
-    isAgentActive,
-    setIsAgentActive,
     audioMode,
     toggleAudioMode,
+    autoReplyEnabled,
+    toggleAutoReply,
     qrCodeData,
     serverStatus,
     statusMessage,
@@ -359,7 +374,10 @@ export default function useSocket() {
     trainingData,
     addLog,
     sendReply,
-    sendImage,
+    forwardMessage,
+    flowTexts,
+    updateFlowText,
+    sendFile,
     avatars,
     requestAvatars,
     loadChatHistory,

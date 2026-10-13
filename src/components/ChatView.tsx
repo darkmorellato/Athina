@@ -22,6 +22,7 @@ interface ChatViewProps {
   avatarUrl?: string | null;
   /** Inicia um reply citando a mensagem clicada */
   onReplyMessage?: (msg: Message) => void;
+  onForwardMessage?: (msg: Message) => void;
   isAgentTyping: boolean;
   /** Existem mensagens mais antigas para carregar? */
   hasMore?: boolean;
@@ -37,6 +38,7 @@ export const ChatView = memo(function ChatView({
   unreadMark,
   avatarUrl,
   onReplyMessage,
+  onForwardMessage,
   isAgentTyping,
   hasMore,
   isLoadingOlder,
@@ -255,6 +257,7 @@ export const ChatView = memo(function ChatView({
                 lastInGroup={item.lastInGroup}
                 avatarUrl={avatarUrl}
                 onReply={onReplyMessage}
+                onForward={onForwardMessage}
               />
             </Fragment>
           )

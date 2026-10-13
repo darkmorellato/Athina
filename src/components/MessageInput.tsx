@@ -6,18 +6,19 @@
  * inserido na posição do cursor, picker fecha com ESC/clique fora.
  */
 import { useEffect, useRef, useState } from 'react';
-import { Plus, Smile, X } from 'lucide-react';
+import { FileText, Plus, Smile, X } from 'lucide-react';
 import type { ReplyTarget } from '../types/index.js';
-import type { SendImageReplyPayload } from '@shared/contracts.js';
+import { SENDABLE_MIME_TYPES, type SendFileReplyPayload } from '@shared/contracts.js';
 import { SendIcon } from './chat/icons.js';
 
-/** MIME permitido no envio de imagem (fonte única: shared/contracts.ts) */
-type ImageMime = SendImageReplyPayload['mimetype'];
+/** MIME permitido no envio (fonte única: shared/contracts.ts) */
+type SendableMime = SendFileReplyPayload['mimetype'];
 
-interface PendingImage {
+interface PendingFile {
   base64: string; // sem o prefixo data:
-  mimetype: ImageMime;
-  previewUrl: string; // data URL para o <img>
+  mimetype: SendableMime;
+  filename: string;
+  previewUrl: string | null; // data URL só para imagens
   size: number;
 }
 
@@ -26,17 +27,17 @@ interface MessageInputProps {
   onChange: (value: string) => void;
   onSend: () => void;
   /** Envia imagem (colada/arrastada/escolhida) como mensagem com legenda opcional */
-  onSendImage?: (base64: string, mimetype: ImageMime, caption: string) => void;
+  onSendFile?: (base64: string, mimetype: SendableMime, filename: string, caption: string) => void;
   /** Mensagem que está sendo respondida (reply/quote) */
   replyTo?: ReplyTarget | null;
   /** Cancela o reply em andamento */
   onCancelReply?: () => void;
 }
 
-const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // ~15MB (WhatsApp limita ~16MB)
-const ALLOWED_TYPES: readonly ImageMime[] = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-const isAllowedImageType = (t: string): t is ImageMime =>
-  (ALLOWED_TYPES as readonly string[]).includes(t);
+const MAX_FILE_BYTES = 15 * 1024 * 1024; // ~15MB (WhatsApp limita ~16MB)
+const isSendableType = (t: string): t is SendableMime =>
+  (SENDABLE_MIME_TYPES as readonly string[]).includes(t);
+const ACCEPT_ATTR = SENDABLE_MIME_TYPES.join(',');
 const EMOJIS = [
   '😀', '😂', '🥰', '😎', '🤔', '👍', '🙏', '❤️',
   '🔥', '🎉', '✅', '😅', '😍', '😢', '🤝', '💚',
@@ -46,11 +47,11 @@ export function MessageInput({
   value,
   onChange,
   onSend,
-  onSendImage,
+  onSendFile,
   replyTo,
   onCancelReply,
 }: MessageInputProps) {
-  const [pending, setPending] = useState<PendingImage | null>(null);
+  const [pending, setPending] = useState<PendingFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -80,22 +81,23 @@ export function MessageInput({
   const loadFile = (file: File | null | undefined): void => {
     setError(null);
     if (!file) return;
-    if (!isAllowedImageType(file.type)) {
-      setError('Só imagens (JPG, PNG, WEBP ou GIF).');
+    if (!isSendableType(file.type)) {
+      setError('Tipo de arquivo não suportado (imagem, vídeo, PDF, Word, Excel ou texto).');
       return;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      setError(`Imagem muito grande (máx. ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)}MB).`);
+    if (file.size > MAX_FILE_BYTES) {
+      setError(`Arquivo muito grande (máx. ${Math.floor(MAX_FILE_BYTES / 1024 / 1024)}MB).`);
       return;
     }
-    const mime = file.type; // já estreitado pelo type guard (ImageMime)
+    const mime = file.type; // já estreitado pelo type guard (SendableMime)
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = String(reader.result ?? '');
       const [, base64] = dataUrl.split(',');
-      setPending({ base64, mimetype: mime, previewUrl: dataUrl, size: file.size });
+      const previewUrl = mime.startsWith('image/') ? dataUrl : null;
+      setPending({ base64, mimetype: mime, filename: file.name || 'arquivo', previewUrl, size: file.size });
     };
-    reader.onerror = () => setError('Não consegui ler a imagem.');
+    reader.onerror = () => setError('Não consegui ler o arquivo.');
     reader.readAsDataURL(file);
   };
 
@@ -125,8 +127,8 @@ export function MessageInput({
 
   const handleSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
-    if (pending && onSendImage) {
-      onSendImage(pending.base64, pending.mimetype, value.trim());
+    if (pending && onSendFile) {
+      onSendFile(pending.base64, pending.mimetype, pending.filename, value.trim());
       setPending(null);
       onChange(''); // legenda enviada junto — limpa o campo
       return;
@@ -190,14 +192,20 @@ export function MessageInput({
 
       {pending && (
         <div className="wa-composer-chip">
-          <img
-            src={pending.previewUrl}
-            alt="Pré-visualização"
-            className="w-12 h-12 rounded-lg object-cover border border-black/5 shrink-0"
-          />
+          {pending.previewUrl ? (
+            <img
+              src={pending.previewUrl}
+              alt="Pré-visualização"
+              className="w-12 h-12 rounded-lg object-cover border border-black/5 shrink-0"
+            />
+          ) : (
+            <div className="w-12 h-12 rounded-lg bg-black/5 flex items-center justify-center shrink-0">
+              <FileText size={20} className="text-black/50" />
+            </div>
+          )}
           <div className="flex flex-col min-w-0">
             <span className="text-[12.5px] font-semibold text-black/80 truncate">
-              Imagem pronta para enviar
+              {pending.filename}
             </span>
             <span className="text-[11px] text-black/45">
               {(pending.size / 1024).toFixed(0)} KB · a legenda é o texto do campo
@@ -210,7 +218,7 @@ export function MessageInput({
               setError(null);
             }}
             className="wa-icon-btn wa-icon-btn-sm"
-            title="Remover imagem"
+            title="Remover arquivo"
           >
             <X size={16} />
           </button>
@@ -229,7 +237,7 @@ export function MessageInput({
         <input
           ref={fileRef}
           type="file"
-          accept="image/jpeg,image/png,image/webp,image/gif"
+          accept={ACCEPT_ATTR}
           className="hidden"
           onChange={handleFilePick}
         />
@@ -258,8 +266,8 @@ export function MessageInput({
             type="submit"
             className="wa-icon-btn wa-icon-btn-sm wa-send-btn"
             disabled={!canSend}
-            title={pending ? 'Enviar imagem' : 'Enviar mensagem'}
-            aria-label={pending ? 'Enviar imagem' : 'Enviar mensagem'}
+            title={pending ? 'Enviar arquivo' : 'Enviar mensagem'}
+            aria-label={pending ? 'Enviar arquivo' : 'Enviar mensagem'}
           >
             <SendIcon width={20} height={20} />
           </button>

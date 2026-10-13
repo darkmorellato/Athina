@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
-import type { AgentLog } from '../types/index.js';
 
 interface UseAthinaPanelProps {
   socket: Socket | null;

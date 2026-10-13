@@ -75,7 +75,7 @@ export function humanDelayMs(): number {
 }
 
 /**
- * Espelho EXATO de sanitizeForWhatsApp() do backend (AgentService.ts):
+ * Espelho EXATO de sanitizeForWhatsApp() do backend (utils/sanitizeForWhatsApp.ts):
  * TODO texto do 'send-reply' é sanitizado lá antes de ir ao WhatsApp, então a
  * mensagem local do painel precisa ter a MESMA forma — senão a mensagem real
  * que volta (message_create) difere do rascunho local, o dedupe não acha o

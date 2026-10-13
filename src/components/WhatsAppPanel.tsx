@@ -6,12 +6,13 @@ import { MessageInput } from './MessageInput.tsx';
 import { TrainingTab } from './WhatsAppPanel/TrainingTab.tsx';
 import { AnalyticsTab } from './WhatsAppPanel/AnalyticsTab.tsx';
 import { QRCodeScreen } from './WhatsAppPanel/QRCodeScreen.tsx';
+import { ForwardModal } from './WhatsAppPanel/ForwardModal.tsx';
 import { SidebarHeader } from './WhatsAppPanel/SidebarHeader.tsx';
-import { classifyContact, isHostile } from './WhatsAppPanel/panelHelpers.js';
+import { classifyContact, isHostile, isDefaultPinned, loadPinnedIds, savePinnedIds } from './WhatsAppPanel/panelHelpers.js';
 import { TabBtn } from './WhatsAppPanel/TabBtn.js';
-import type { Message, ReplyTarget, TrainingData } from '../types/index.js';
+import type { AnalyticsStats, Message, ReplyTarget, TrainingData } from '../types/index.js';
 import type { UnreadMark } from '../hooks/socket/unreadLogic.js';
-import type { SendImageReplyPayload } from '@shared/contracts.js';
+import type { FlowTextItem, SendFileReplyPayload } from '@shared/contracts.js';
 // Note: SectorFilterBar is available but currently not used in the UI
 
 type ActiveTab = 'chats' | 'training' | 'analytics';
@@ -21,18 +22,21 @@ interface WhatsAppPanelProps {
   qrCodeData: string | null;
   statusMessage: string;
   messages: Message[];
-  chatList: Array<{ id: string; name: string }>;
+  chatList: Array<{ id: string; name: string; timestamp?: number }>;
   historyMeta: Record<string, { loaded: number; hasMore: boolean; loading: boolean }>;
   onLoadOlder: (chatId: string) => void;
   isAgentTyping: boolean;
   sendReply: (to: string, text: string, isManual?: boolean, quotedMessageId?: string) => void;
+  forwardMessage: (serializedId: string, to: string) => void;
   restartWhatsApp: () => void;
-  stats: import('../types/index.js').AnalyticsStats;
+  stats: AnalyticsStats;
   refreshStats: () => void;
   resetStats: () => void;
   trainingData: TrainingData;
   updateTrainingRules: (rules: string[]) => void;
   updateTrainingQas: (qas: TrainingData['qaExamples']) => void;
+  flowTexts: FlowTextItem[];
+  updateFlowText: (key: string, text: string) => void;
   selectedContact: string | null;
   setSelectedContact: (c: string | null) => void;
   inputValue: string;
@@ -44,19 +48,19 @@ interface WhatsAppPanelProps {
   unreadCounts: Record<string, number>;
   unreadMark?: UnreadMark;
   /** Envia imagem (colada/arrastada) como resposta no WhatsApp */
-  sendImage: (to: string, base64: string, mimetype: SendImageReplyPayload['mimetype'], caption: string) => void;
+  sendFile: (to: string, base64: string, mimetype: SendFileReplyPayload['mimetype'], filename: string, caption: string) => void;
 }
 
 function WhatsAppPanel({
   isConnected, qrCodeData, statusMessage, messages,
   chatList, historyMeta, onLoadOlder,
   isAgentTyping,
-  sendReply, restartWhatsApp, stats, refreshStats, resetStats, trainingData,
-  updateTrainingRules, updateTrainingQas,
+  sendReply, forwardMessage, restartWhatsApp, stats, refreshStats, resetStats, trainingData,
+  updateTrainingRules, updateTrainingQas, flowTexts, updateFlowText,
   selectedContact, setSelectedContact,
   inputValue, setInputValue,
   avatars, requestAvatars,
-  sendImage,
+  sendFile,
   unreadCounts, unreadMark,
 }: WhatsAppPanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('chats');
@@ -81,6 +85,9 @@ function WhatsAppPanel({
   }, [selectedContact, onLoadOlder]);
 
   /** Inicia reply citando uma mensagem real do WhatsApp (tem serializedId) */
+  /** Mensagem escolhida para encaminhar (abre o seletor de conversa) */
+  const [forwardSource, setForwardSource] = useState<Message | null>(null);
+
   const handleReplyMessage = useCallback(
     (m: Message) => {
       if (!m.serializedId || !selectedContact) return;
@@ -114,6 +121,15 @@ function WhatsAppPanel({
   // Sidebar: TODOS os contatos e conversas (estilo WhatsApp Web), com prévia
   // da última mensagem. Ordenação: conversas recentes primeiro; contatos sem
   // conversa em ordem alfabética.
+  /** null = operador nunca mexeu nos pins → vale o padrão (atendentes). */
+  const [pinnedIds, setPinnedIds] = useState<string[] | null>(loadPinnedIds);
+  const pinnedSet = useMemo(() => new Set(pinnedIds ?? []), [pinnedIds]);
+
+  const chatTimestamps = useMemo(
+    () => new Map(chatList.map((e) => [e.id, e.timestamp ?? 0] as const)),
+    [chatList]
+  );
+
   const contacts = useMemo(() => {
     const list: any[] = [];
     const seen = new Set<string>();
@@ -128,8 +144,12 @@ function WhatsAppPanel({
             .map((e) => e.m)
         : [];
       const lastMsg = sorted[sorted.length - 1];
+      // Última atividade = a mais recente entre a data do chat (WhatsApp) e a
+      // última mensagem carregada. Mensagem local (sem timestamp) fica no topo.
+      const msgTs = lastMsg ? lastMsg.timestamp || Number.MAX_SAFE_INTEGER : 0;
+      const activity = Math.max(msgTs, chatTimestamps.get(id) ?? 0);
       const { className: sectorColor, label: sector, sectorKey } =
-        classifyContact(contactMsgs as Message[]);
+        classifyContact();
       return {
         id,
         name: lastMsg?.fromName || fallbackName || id.split('@')[0],
@@ -143,7 +163,8 @@ function WhatsAppPanel({
         // Conversa SEM mensagens (contato da agenda) → undefined: fica no FIM
         // da lista. Com mensagem mas sem timestamp (mensagem local/nova) →
         // conta como mais recente (sobe pro topo, como no WhatsApp).
-        sortKey: lastMsg ? lastMsg.timestamp || Number.MAX_SAFE_INTEGER : undefined,
+        sortKey: activity > 0 ? activity : undefined,
+        pinned: pinnedIds === null ? isDefaultPinned(id) : pinnedSet.has(id),
       };
     };
 
@@ -163,6 +184,7 @@ function WhatsAppPanel({
     //  1º) conversas primeiro — mais recentes no topo;
     //  2º) contatos SEM conversa (agenda) no fim, em ordem alfabética.
     list.sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       const aHasChat = a.sortKey !== undefined;
       const bHasChat = b.sortKey !== undefined;
       if (aHasChat !== bHasChat) return aHasChat ? -1 : 1;
@@ -173,7 +195,16 @@ function WhatsAppPanel({
     });
 
     return list;
-  }, [messagesByContact, chatList, unreadCounts]);
+  }, [messagesByContact, chatList, chatTimestamps, unreadCounts, pinnedIds, pinnedSet]);
+
+  const togglePin = useCallback((id: string) => {
+    setPinnedIds((prev) => {
+      const current = prev ?? contacts.filter((c) => isDefaultPinned(c.id)).map((c) => c.id);
+      const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+      savePinnedIds(next);
+      return next;
+    });
+  }, [contacts]);
 
   const selectedMessages = useMemo(() => {
     if (!selectedContact) return [];
@@ -274,7 +305,7 @@ function WhatsAppPanel({
               </div>
               <ContactList contacts={filteredContacts} selectedContact={selectedContact}
                 onSelectContact={setSelectedContact} resetScrollKey={searchQuery}
-                avatars={avatars} onRequestAvatars={requestAvatars} />
+                avatars={avatars} onRequestAvatars={requestAvatars} onTogglePin={togglePin} />
             </div>
             {/* Chat Area */}
             <div className="wa-chat flex-1 flex flex-col bg-[#f5f1eb] relative overflow-hidden">
@@ -282,18 +313,29 @@ function WhatsAppPanel({
                 unreadMark={unreadMark}
                 avatarUrl={selectedContact ? avatars[selectedContact] : undefined}
                 onReplyMessage={handleReplyMessage}
+                onForwardMessage={setForwardSource}
                 isAgentTyping={isAgentTyping}
                 hasMore={selectedMeta?.hasMore ?? false}
                 isLoadingOlder={selectedMeta?.loading ?? false}
                 historyLoaded={Boolean(selectedMeta && !selectedMeta.loading)}
                 onLoadOlder={handleLoadOlder} />
+              {forwardSource?.serializedId && (
+                <ForwardModal
+                  contacts={contacts}
+                  onClose={() => setForwardSource(null)}
+                  onPick={(to) => {
+                    forwardMessage(forwardSource.serializedId!, to);
+                    setForwardSource(null);
+                  }}
+                />
+              )}
               {selectedContact && (
                 <MessageInput value={inputValue} onChange={setInputValue}
                   onSend={handleSendMessage}
                   replyTo={activeReplyTo}
                   onCancelReply={() => setReplyTo(null)}
-                  onSendImage={(base64, mimetype, caption) =>
-                    sendImage(selectedContact, base64, mimetype, caption)} />
+                  onSendFile={(base64, mimetype, filename, caption) =>
+                    sendFile(selectedContact, base64, mimetype, filename, caption)} />
               )}
             </div>
           </div>
@@ -301,7 +343,9 @@ function WhatsAppPanel({
       ) : activeTab === 'training' ? (
         <TrainingTab trainingData={trainingData}
           updateTrainingRules={updateTrainingRules}
-          updateTrainingQas={updateTrainingQas} />
+          updateTrainingQas={updateTrainingQas}
+          flowTexts={flowTexts}
+          updateFlowText={updateFlowText} />
       ) : (
         <AnalyticsTab stats={stats} onRefresh={refreshStats} onReset={resetStats} />
       )}

@@ -156,7 +156,7 @@ export const VoiceNotePlayer = memo(function VoiceNotePlayer({
     return () => {
       self();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, []);
 
   /** Inicia a reprodução a partir de offsetRef. */

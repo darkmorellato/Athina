@@ -4,7 +4,7 @@
  * Acessível por teclado (listbox/option) e com a paleta de avatar do WA.
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { MessageCircle } from 'lucide-react';
+import { MessageCircle, Pin } from 'lucide-react';
 import type { Contact } from '../types/index.js';
 import { avatarColorFor } from './waAvatarColors.js';
 
@@ -21,6 +21,8 @@ interface ContactListProps {
   avatars?: Record<string, string | null>;
   /** Pede fotos para os jids (só as faltantes são pedidas) */
   onRequestAvatars?: (jids: string[]) => void;
+  /** Fixa/desfixa a conversa (pin) */
+  onTogglePin?: (id: string) => void;
 }
 
 export const ContactList = memo(function ContactList({
@@ -30,6 +32,7 @@ export const ContactList = memo(function ContactList({
   resetScrollKey,
   avatars = {},
   onRequestAvatars,
+  onTogglePin,
 }: ContactListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -110,6 +113,7 @@ export const ContactList = memo(function ContactList({
           isSelected={selectedContact === c.id}
           onClick={() => onSelectContact(c.id)}
           avatarUrl={avatars[c.id]}
+          onTogglePin={onTogglePin}
         />
       ))}
       {end < total && <div style={{ height: (total - end) * ITEM_HEIGHT }} aria-hidden />}
@@ -122,9 +126,10 @@ interface ContactItemProps {
   isSelected: boolean;
   onClick: () => void;
   avatarUrl?: string | null;
+  onTogglePin?: (id: string) => void;
 }
 
-const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, avatarUrl }: ContactItemProps) {
+const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, avatarUrl, onTogglePin }: ContactItemProps) {
   // Se a URL da foto falhar ao carregar, volta para a letra (fallback)
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const showPhoto = Boolean(avatarUrl) && failedUrl !== avatarUrl;
@@ -146,7 +151,7 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
       aria-label={contact.unread > 0 ? `${contact.name}, ${contact.unread} não lidas` : contact.name}
       tabIndex={0}
       style={{ height: ITEM_HEIGHT }}
-      className={`flex items-center gap-3 px-4 box-border cursor-pointer hover:bg-gray-50
+      className={`group flex items-center gap-3 px-4 box-border cursor-pointer hover:bg-gray-50
         border-b border-gray-50 transition-colors overflow-hidden
         focus:outline-hidden focus-visible:bg-[#f0f2f5]
         ${isSelected ? 'bg-[#f0f2f5]' : ''}
@@ -174,6 +179,7 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-center">
           <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
+            {contact.pinned && <Pin size={12} className="text-[#8696a0] shrink-0" aria-label="Fixada" />}
             {contact.name}
             {contact.isHostile && (
               <span className="px-1.5 py-0.5 text-[8px] font-extrabold
@@ -193,6 +199,17 @@ const ContactItem = memo(function ContactItem({ contact, isSelected, onClick, av
         </div>
         <div className="flex justify-between items-center mt-1 gap-1">
           <div className="flex items-center gap-1.5 min-w-0">
+            {onTogglePin && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onTogglePin(contact.id); }}
+                title={contact.pinned ? 'Desafixar conversa' : 'Fixar conversa no topo'}
+                aria-label={contact.pinned ? 'Desafixar conversa' : 'Fixar conversa'}
+                className={`shrink-0 p-0.5 rounded hover:bg-gray-200 ${contact.pinned ? 'text-[#1daa61]' : 'text-gray-300 opacity-0 group-hover:opacity-100'}`}
+              >
+                <Pin size={12} />
+              </button>
+            )}
             <p className={`text-xs truncate max-w-[130px]
               ${contact.isHostile ? 'text-red-500 font-medium' : contact.unread > 0 ? 'text-[#0a0a0a]' : 'text-gray-500'}`}>
               {contact.lastText}
