@@ -18,7 +18,8 @@ export const DEFAULT_STATS: AnalyticsStats = {
 // Sound alert for hostile messages (Web Audio API)
 export function playAlertSound(): void {
   try {
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const AudioCtor = window.AudioContext ?? (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    const audioCtx = new AudioCtor!();
     const playNote = (freq: number, duration: number, delay: number): void => {
       const osc = audioCtx.createOscillator();
       const gainNode = audioCtx.createGain();

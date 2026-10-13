@@ -1,7 +1,8 @@
 /**
  * @fileoverview Puppeteer launch arguments and event setup for WhatsApp.
  */
-import type { Client } from 'whatsapp-web.js';
+/// <reference lib="dom" />
+import type { Client, Message } from 'whatsapp-web.js';
 import type { Page } from 'puppeteer';
 import logger from '../../utils/logger.js';
 
@@ -58,7 +59,7 @@ export function setupClientEvents(
     onLoading?.(percent, message);
   });
 
-  client.on('message_create', (msg: any) => {
+  client.on('message_create', (msg: Message) => {
     onMessage?.(msg);
   });
 
@@ -75,7 +76,7 @@ export interface ClientEventHandlers {
   onAuthFailure?: () => void;
   onDisconnected?: (reason: string) => void;
   onLoading?: (percent: number, message: string) => void;
-  onMessage?: (msg: any) => void;
+  onMessage?: (msg: Message) => void;
   onMessageAck?: (msg: AckMessageLike, ack: number) => void;
 }
 
@@ -87,13 +88,11 @@ export function startUseHereAutomation(client: Client): ReturnType<typeof setInt
       if (!pupPage) return;
 
       const clicked = await pupPage.evaluate(() => {
-        const doc = (globalThis as any).document;
-        if (!doc) return false;
-        const buttons = Array.from(doc.querySelectorAll('div[role="button"], button'));
+        const buttons = Array.from(document.querySelectorAll<HTMLElement>('div[role="button"], button'));
         for (const btn of buttons) {
-          const txt = (btn as any).textContent || '';
+          const txt = btn.textContent || '';
           if (txt.includes('Usar aqui') || txt.includes('Use here') || txt.includes('USAR AQUÍ')) {
-            (btn as any).click();
+            btn.click();
             return true;
           }
         }

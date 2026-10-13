@@ -1,7 +1,7 @@
 /**
  * @fileoverview WhatsApp Web client service using whatsapp-web.js.
  */
-import type { Client as WWebClient } from 'whatsapp-web.js';
+import type { Client as WWebClient, Message } from 'whatsapp-web.js';
 import type { Server as SocketServer } from 'socket.io';
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
@@ -14,7 +14,7 @@ import logger from '../utils/logger.js';
 import chatStateService from './ChatStateService.js';
 import { setupClientEvents, startUseHereAutomation, PUPPETEER_ARGS } from './helpers/whatsappClientSetup.js';
 import type { AckMessageLike } from './helpers/whatsappClientSetup.js';
-import { getRecentChats } from './helpers/whatsappChatHelper.js';
+import { getRecentChats, type ChatEntry, type PhonebookEntry } from './helpers/whatsappChatHelper.js';
 import { syncPhonebookContacts } from './helpers/whatsappPhonebookHelper.js';
 import { handleIncomingMessage } from './helpers/whatsappMessageHelper.js';
 import { clearAvatarCache } from './helpers/whatsappAvatarHelper.js';
@@ -38,10 +38,10 @@ class WhatsAppService {
   private emitter: SocketServer | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private cachedChats: Array<{ id: string; name: string; messages: any[] }> | null = null;
+  private cachedChats: ChatEntry[] | null = null;
   private lastCacheTime = 0;
-  private fetchPromise: Promise<Array<{ id: string; name: string; messages: any[] }>> | null = null;
-  private phonebookContacts: any[] = [];
+  private fetchPromise: Promise<ChatEntry[]> | null = null;
+  private phonebookContacts: PhonebookEntry[] = [];
   private contactNameMap = new Map<string, string>();
   private isSyncingPhonebook = false;
   private cacheCleanupInterval: ReturnType<typeof setInterval> | null = null;
@@ -67,18 +67,18 @@ class WhatsAppService {
   private getHelperContext() {
     return {
       client: this.client, state: this.state, phonebookContacts: this.phonebookContacts,
-      setPhonebookContacts: (contacts: any[]) => { this.phonebookContacts = contacts; },
+      setPhonebookContacts: (contacts: PhonebookEntry[]) => { this.phonebookContacts = contacts; },
       contactNameMap: this.contactNameMap, isSyncingPhonebook: this.isSyncingPhonebook,
       setIsSyncingPhonebook: (val: boolean) => { this.isSyncingPhonebook = val; },
-      cachedChats: this.cachedChats, setCachedChats: (chats: any[] | null) => { this.cachedChats = chats; },
+      cachedChats: this.cachedChats, setCachedChats: (chats: ChatEntry[] | null) => { this.cachedChats = chats; },
       lastCacheTime: this.lastCacheTime, setLastCacheTime: (time: number) => { this.lastCacheTime = time; },
-      fetchPromise: this.fetchPromise, setFetchPromise: (promise: Promise<any> | null) => { this.fetchPromise = promise; },
-      emit: (event: string, data?: any) => this.emit(event, data),
+      fetchPromise: this.fetchPromise, setFetchPromise: (promise: Promise<ChatEntry[]> | null) => { this.fetchPromise = promise; },
+      emit: (event: string, data?: unknown) => this.emit(event, data),
     };
   }
 
   async syncPhonebookContacts(): Promise<void> { return syncPhonebookContacts(this.getHelperContext()); }
-  async getRecentChats(): Promise<Array<{ id: string; name: string; messages: any[] }>> { return getRecentChats(this.getHelperContext()); }
+  async getRecentChats(): Promise<ChatEntry[]> { return getRecentChats(this.getHelperContext()); }
 
   async clearSession(): Promise<void> {
     const authPath = path.resolve(path.dirname(__filename), '../../.wwebjs_auth');
@@ -299,7 +299,7 @@ class WhatsAppService {
           this.emit('message-ack', { id: serialized, ack: Number(ack) || 0 });
         }
       },
-      onMessage: (msg: any) => {
+      onMessage: (msg: Message) => {
         // Mensagem do CLIENTE → rearma o reinício automático (5 min de
         // ausência reinicia o atendimento do zero). Funciona também no
         // modo autônomo, onde o painel não consulta o estado.

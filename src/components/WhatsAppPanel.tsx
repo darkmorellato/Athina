@@ -10,7 +10,7 @@ import { ForwardModal } from './WhatsAppPanel/ForwardModal.tsx';
 import { SidebarHeader } from './WhatsAppPanel/SidebarHeader.tsx';
 import { classifyContact, isHostile, isDefaultPinned, loadPinnedIds, savePinnedIds } from './WhatsAppPanel/panelHelpers.js';
 import { TabBtn } from './WhatsAppPanel/TabBtn.js';
-import type { AnalyticsStats, Message, ReplyTarget, TrainingData } from '../types/index.js';
+import type { AnalyticsStats, Contact, Message, ReplyTarget, TrainingData } from '../types/index.js';
 import type { UnreadMark } from '../hooks/socket/unreadLogic.js';
 import type { FlowTextItem, SendFileReplyPayload } from '@shared/contracts.js';
 // Note: SectorFilterBar is available but currently not used in the UI
@@ -50,6 +50,9 @@ interface WhatsAppPanelProps {
   /** Envia imagem (colada/arrastada) como resposta no WhatsApp */
   sendFile: (to: string, base64: string, mimetype: SendFileReplyPayload['mimetype'], filename: string, caption: string) => void;
 }
+
+/** Linha da barra lateral: contato + chave de ordenação (atividade). */
+type SidebarRow = Contact & { sortKey: number | undefined };
 
 function WhatsAppPanel({
   isConnected, qrCodeData, statusMessage, messages,
@@ -131,7 +134,7 @@ function WhatsAppPanel({
   );
 
   const contacts = useMemo(() => {
-    const list: any[] = [];
+    const list: SidebarRow[] = [];
     const seen = new Set<string>();
 
     const buildItem = (id: string, fallbackName: string) => {
@@ -188,7 +191,7 @@ function WhatsAppPanel({
       const aHasChat = a.sortKey !== undefined;
       const bHasChat = b.sortKey !== undefined;
       if (aHasChat !== bHasChat) return aHasChat ? -1 : 1;
-      if (aHasChat && bHasChat && a.sortKey !== b.sortKey) {
+      if (a.sortKey !== undefined && b.sortKey !== undefined && a.sortKey !== b.sortKey) {
         return b.sortKey - a.sortKey;
       }
       return String(a.name).localeCompare(String(b.name), 'pt-BR');
@@ -237,6 +240,7 @@ function WhatsAppPanel({
         const virtualJid = `${cleanNum}@c.us`;
         result = [
           {
+            sortKey: undefined,
             id: virtualJid,
             name: `Iniciar Conversa: +${cleanNum}`,
             lastText: 'Clique para abrir conversa...',

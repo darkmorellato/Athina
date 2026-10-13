@@ -39,7 +39,7 @@ export async function extractPixUrlFromPdf(boletoUrl: string): Promise<string> {
       });
 
       finalUrl =
-        (redirectRes.request as any)?.res?.responseUrl ||
+        (redirectRes.request as { res?: { responseUrl?: string } } | undefined)?.res?.responseUrl ||
         shortUrl;
     }
   } catch (err) {

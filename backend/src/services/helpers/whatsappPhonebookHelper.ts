@@ -1,3 +1,4 @@
+import type { Contact } from 'whatsapp-web.js';
 import logger from '../../utils/logger.js';
 import { getRecentChats, type ChatHelperContext } from './whatsappChatHelper.js';
 
@@ -8,9 +9,9 @@ export async function syncPhonebookContacts(ctx: ChatHelperContext): Promise<voi
     logger.info('Starting background phonebook sync...');
     
     const contacts = await ctx.client.getContacts();
-    const allContacts = contacts.map((c: any) => ({
+    const allContacts = contacts.map((c: Contact) => ({
       id: {
-        _serialized: c.id?._serialized || c.id,
+        _serialized: c.id._serialized,
         server: c.id?.server,
         user: c.id?.user
       },

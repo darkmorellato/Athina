@@ -1,7 +1,15 @@
 /**
  * @fileoverview Helper for handling real-time WhatsApp messages.
  */
+import type { Message } from 'whatsapp-web.js';
 import logger from '../../utils/logger.js';
+
+/** Campos internos do whatsapp-web.js usados para tamanho, remetente e chat. */
+type WwebMessage = Message & {
+  size?: number;
+  _data?: { size?: number; mimetype?: string; notifyName?: string };
+  _getChatId?: () => string;
+};
 import { maskPhone } from '../../utils/redact.js';
 
 /**
@@ -15,9 +23,10 @@ const MAX_MEDIA_BASE64_CHARS = 5 * 1024 * 1024;
 
 /** Handle incoming or outgoing WhatsApp messages and emit socket events */
 export async function handleIncomingMessage(
-  msg: any,
-  emit: (event: string, data: any) => void
+  rawMsg: Message,
+  emit: (event: string, data: unknown) => void
 ): Promise<void> {
+  const msg = rawMsg as WwebMessage;
   if (msg.from?.includes('broadcast') || msg.to?.includes('broadcast')) return;
 
   logger.info(

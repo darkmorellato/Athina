@@ -10,6 +10,15 @@ import logger from '../utils/logger.js';
 import { processPixPayment } from './helpers/paymobiPixProcessor.js';
 import { searchContracts } from './helpers/paymobiApiHelper.js';
 import type { PaymobiResult, ClientData } from '../types/index.js';
+import type { PaymobiContract } from './helpers/paymobiApiHelper.js';
+
+interface PaymobiInstallment {
+  numberInstallment: number | string;
+  dueDate: string;
+  value: number | string;
+  status: string;
+  boletoLink?: string;
+}
 
 // Security fix: Shared browser instance with mutex to prevent race conditions
 let sharedBrowser: Browser | null = null;
@@ -125,12 +134,12 @@ export class PaymobiScraperService {
       // 3. Enforce strict exact match if the search was by CPF or IMEI
       let matchedContracts = contracts;
       if (isCpf) {
-        matchedContracts = contracts.filter((c: any) => {
+        matchedContracts = contracts.filter((c: PaymobiContract) => {
           const cCpf = String(c.cpf || '').replace(/\D/g, '');
           return cCpf === cleanQuery;
         });
       } else if (isImei) {
-        matchedContracts = contracts.filter((c: any) => {
+        matchedContracts = contracts.filter((c: PaymobiContract) => {
           const cImei = String(c.imei || '').replace(/\D/g, '');
           return cImei === cleanQuery;
         });
@@ -148,9 +157,9 @@ export class PaymobiScraperService {
       }
 
       // Filter active contracts (not canceled and not completed)
-      const activeContracts = matchedContracts.filter((c: any) => !c.canceled && !c.completed);
+      const activeContracts = matchedContracts.filter((c: PaymobiContract) => !c.canceled && !c.completed);
       if (activeContracts.length === 0) {
-        const completedContract = matchedContracts.find((c: any) => c.completed);
+        const completedContract = matchedContracts.find((c: PaymobiContract) => c.completed);
         if (completedContract) {
           return { success: false, reason: 'CONTRACT_FINALIZED', message: FINALIZED_MSG };
         }
@@ -163,13 +172,13 @@ export class PaymobiScraperService {
       // Format client data to match frontend requirements
       const clientData: ClientData = {
         loja: selected.nickname || 'Loja Paymobi',
-        dataVenda: selected.dataEfetivacao,
-        expirationDate: selected.nextRenewalDate,
+        dataVenda: selected.dataEfetivacao ?? '',
+        expirationDate: selected.nextRenewalDate ?? '',
         duration: `${selected.parcelas} meses`,
-        cpf: selected.cpf,
+        cpf: selected.cpf ?? '',
         contrato: selected.contrato || String(selected.id),
         nome: selected.customerName || 'Cliente Paymobi',
-        imei: selected.imei,
+        imei: selected.imei ?? '',
         statusVenda: selected.completed ? 'completed' : 'active',
       };
 
@@ -182,7 +191,7 @@ export class PaymobiScraperService {
       });
 
       const installmentsData = installmentsResponse.data?.result;
-      const installments = installmentsData?.installments || [];
+      const installments: PaymobiInstallment[] = installmentsData?.installments || [];
 
       const formatInstallmentDate = (dueDate: unknown): string => {
         const dStr = String(dueDate);
@@ -194,7 +203,7 @@ export class PaymobiScraperService {
         new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value) || 0);
 
       // Lista completa (pagas e pendentes) — usada no "Verificar Saldo".
-      const installmentSummaries = installments.map((inst: any) => ({
+      const installmentSummaries = installments.map((inst) => ({
         numero: String(inst.numberInstallment),
         vencimento: formatInstallmentDate(inst.dueDate),
         valor: formatInstallmentValue(inst.value),
@@ -204,11 +213,11 @@ export class PaymobiScraperService {
       // Quantidade de parcelas em atraso (não pagas e já vencidas) — distingue
       // "amarelo" (1 atraso, self-service) de "vermelho" (2+, vai para humano).
       const overdueCount = installments.filter(
-        (inst: any) => inst.status !== 'paid' && new Date(inst.dueDate) < new Date()
+        (inst) => inst.status !== 'paid' && new Date(inst.dueDate) < new Date()
       ).length;
 
       // Find the first unpaid installment
-      const openInstallment = installments.find((inst: any) => inst.status !== 'paid');
+      const openInstallment = installments.find((inst) => inst.status !== 'paid');
 
       if (!openInstallment) {
         return {

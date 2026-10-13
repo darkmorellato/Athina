@@ -1,27 +1,53 @@
+import type { Chat, Client, Message } from 'whatsapp-web.js';
 import logger from '../../utils/logger.js';
 
+/** Contato da agenda já normalizado por syncPhonebookContacts (whatsappPhonebookHelper). */
+export interface PhonebookEntry {
+  id?: { _serialized?: string; server?: string; user?: string };
+  name?: string;
+  pushname?: string;
+  number?: string;
+  isGroup?: boolean;
+  isMyContact?: boolean;
+}
+
+/** Mensagem no formato usado pelo painel (contracts: ChatMessage). */
+export interface MessagePayload {
+  id: string;
+  serializedId?: string;
+  text: string;
+  sender: 'agent' | 'customer';
+  fromId: string;
+  fromName: string;
+  time: string;
+  timestamp: number;
+  mediaData?: string;
+  mediaMimeType?: string;
+  quoted?: { body: string; fromMe: boolean };
+}
+
 export interface ChatHelperContext {
-  client: any;
+  client: Client | null;
   state: string;
-  phonebookContacts: any[];
-  setPhonebookContacts: (contacts: any[]) => void;
+  phonebookContacts: PhonebookEntry[];
+  setPhonebookContacts: (contacts: PhonebookEntry[]) => void;
   contactNameMap: Map<string, string>;
   isSyncingPhonebook: boolean;
   setIsSyncingPhonebook: (val: boolean) => void;
-  cachedChats: any[] | null;
-  setCachedChats: (chats: any[] | null) => void;
+  cachedChats: ChatEntry[] | null;
+  setCachedChats: (chats: ChatEntry[] | null) => void;
   lastCacheTime: number;
   setLastCacheTime: (time: number) => void;
-  fetchPromise: Promise<any> | null;
-  setFetchPromise: (promise: Promise<any> | null) => void;
-  emit: (event: string, data?: any) => void;
+  fetchPromise: Promise<ChatEntry[]> | null;
+  setFetchPromise: (promise: Promise<ChatEntry[]> | null) => void;
+  emit: (event: string, data?: unknown) => void;
 }
 
 export interface ChatEntry {
   id: string;
   name: string;
   /** 0 = contato sem conversa; 1 = prévia da última mensagem */
-  messages: any[];
+  messages: MessagePayload[];
   timestamp: number;
   /** Não-lidas do WhatsApp (chat.unreadCount) — badge verde na lista do painel */
   unreadCount: number;
@@ -33,7 +59,7 @@ function resolveName(ctx: ChatHelperContext, serializedId: string, fallback?: st
 }
 
 /** Formata uma mensagem da lib como payload nosso */
-function mapMessage(msg: any, chatId: string, name: string): any {
+function mapMessage(msg: Message, chatId: string, name: string): MessagePayload {
   const ts = typeof msg.timestamp === 'number' ? msg.timestamp : 0;
   return {
     id: msg.id?.id ?? `${chatId}-${ts}`,
@@ -53,7 +79,8 @@ function mapMessage(msg: any, chatId: string, name: string): any {
  * O histórico completo (15 últimas, com "ver anterior") é carregado sob demanda.
  */
 export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[]> {
-  if (!ctx.client || ctx.state !== 'READY') return [];
+  const client = ctx.client;
+  if (!client || ctx.state !== 'READY') return [];
 
   if (ctx.fetchPromise) {
     return ctx.fetchPromise;
@@ -66,7 +93,7 @@ export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[
 
   const promise = (async () => {
     try {
-      const chats = await ctx.client.getChats();
+      const chats: Chat[] = await client.getChats();
       const entries: ChatEntry[] = [];
       const seen = new Set<string>();
 
@@ -74,11 +101,11 @@ export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[
         if (chat.isGroup) continue;
         const id = chat.id._serialized;
         const name = resolveName(ctx, id, chat.name);
-        let messages: any[] = [];
+        let messages: MessagePayload[] = [];
         let timestamp = 0;
 
         try {
-          const lastMsg = chat.lastMessage;
+          const lastMsg = chat.lastMessage as (Message & { isNotification?: boolean }) | undefined;
           if (lastMsg && !lastMsg.isNotification) {
             timestamp = typeof lastMsg.timestamp === 'number' ? lastMsg.timestamp : 0;
             messages = [mapMessage(lastMsg, id, name)];
@@ -194,9 +221,9 @@ export async function getRecentChats(ctx: ChatHelperContext): Promise<ChatEntry[
  *   internamente e devolve as N últimas; o frontend mescla por id.
  */
 export async function handleRequestChatHistory(
-  socket: any,
+  socket: { emit: (event: 'chat-history-loaded', data: { chatId: string; messages: MessagePayload[]; hasMore: boolean }) => void },
   chatId: string,
-  client: any,
+  client: Client | null,
   isReady: boolean,
   limit = 15
 ): Promise<void> {
@@ -215,7 +242,7 @@ export async function handleRequestChatHistory(
         const wwebMsgs = await chat.fetchMessages({ limit: safeLimit });
         const name = chat.name || chatId.split('@')[0];
 
-        const messages = await Promise.all(wwebMsgs.map(async (msg: any) => {
+        const messages = await Promise.all(wwebMsgs.map(async (msg: Message) => {
           let mediaData: string | undefined;
           let mediaMimeType: string | undefined;
 
