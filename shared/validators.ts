@@ -109,29 +109,40 @@ export interface ExtractedDocument {
 
 /**
  * Extrai um documento plausível (CPF de 11 dígitos, CNPJ de 14 dígitos ou IMEI de 15 dígitos).
- * Rejeita sequências de dígitos repetidos (00000000000, 11111111111) e entradas com formato de telefone.
+ * - Não funde números separados por espaço ("52998224725 356938035643809" gera 2 candidatos).
+ * - Prioriza candidatos com dígito verificador matematicamente válido (Mod-11 / Luhn), mesmo
+ *   quando a mensagem também menciona um número de telefone ("meu celular é X e meu cpf é Y").
+ * - Aplica o bloqueio de telefone (`isLikelyPhoneInput`) apenas quando nenhum candidato tem checksum válido.
  */
 export function extractPlausibleDocument(text: string): ExtractedDocument | null {
-  if (!text || isLikelyPhoneInput(text)) return null;
+  if (!text) return null;
 
-  // Procura blocos contíguos de dígitos/pontuação primeiro
-  const matches = text.match(/\d[\d.\-\/\s]{8,22}\d/g) ?? [];
-  const candidates = matches.length > 0 ? matches : [text];
+  // Extrai tokens numéricos contíguos (com pontos, traços ou barras, mas SEM espaço interno)
+  const matches = text.match(/\d[\d.\-/]{8,20}\d/g) ?? [];
+  const rawCandidates = matches.length > 0 ? matches : [text];
 
-  for (const raw of candidates) {
+  const parsedCandidates: ExtractedDocument[] = [];
+  for (const raw of rawCandidates) {
     const clean = raw.replace(/\D/g, '');
     if (isRepeatedDigits(clean)) continue;
     if (clean.length === 15) {
-      return { type: 'imei', digits: clean, checksumValid: isValidImei(clean) };
-    }
-    if (clean.length === 14) {
-      return { type: 'cnpj', digits: clean, checksumValid: isValidCnpj(clean) };
-    }
-    if (clean.length === 11) {
-      return { type: 'cpf', digits: clean, checksumValid: isValidCpf(clean) };
+      parsedCandidates.push({ type: 'imei', digits: clean, checksumValid: isValidImei(clean) });
+    } else if (clean.length === 14) {
+      parsedCandidates.push({ type: 'cnpj', digits: clean, checksumValid: isValidCnpj(clean) });
+    } else if (clean.length === 11) {
+      parsedCandidates.push({ type: 'cpf', digits: clean, checksumValid: isValidCpf(clean) });
     }
   }
-  return null;
+
+  // 1. Se houver qualquer documento com dígito verificador válido, ele tem prioridade máxima
+  const validChecksumDoc = parsedCandidates.find((c) => c.checksumValid);
+  if (validChecksumDoc) return validChecksumDoc;
+
+  // 2. Sem documento com checksum válido: se a frase tem formato explícito de telefone, ignora
+  if (isLikelyPhoneInput(text)) return null;
+
+  // 3. Caso contrário, retorna o primeiro candidato de 11/14/15 dígitos (para o fluxo avisar erro de dígito)
+  return parsedCandidates[0] ?? null;
 }
 
 export function isGreeting(text: string): boolean {

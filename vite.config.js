@@ -22,6 +22,20 @@ export default defineConfig({
       '@shared': '/shared',
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('framer-motion')) return 'vendor-motion';
+          if (id.includes('lucide-react') || id.includes('qrcode.react')) return 'vendor-ui';
+          if (id.includes('socket.io-client') || id.includes('engine.io-client')) return 'vendor-socket';
+          if (id.includes('react-dom') || id.includes('/react/')) return 'vendor-react';
+          return undefined;
+        },
+      },
+    },
+  },
   // Testes de componente (Vitest + Testing Library)
   test: {
     environment: 'jsdom',

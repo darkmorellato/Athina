@@ -68,8 +68,8 @@ export interface ChatFlowData {
   recentTurns?: Array<{ role: 'user' | 'assistant'; content: string; at: number }>;
   /** Timestamp (ms) de quando os dados do contrato no Paymobi foram consultados. */
   contractFetchedAt?: number;
-  /** Timestamp (ms) até quando o atendente humano assumiu a conversa. */
-  humanTakeoverUntil?: number;
+  /** Timestamp (ms) até quando o atendente humano assumiu a conversa (null = liberação explícita). */
+  humanTakeoverUntil?: number | null;
 }
 
 export interface ChatState {
@@ -210,11 +210,29 @@ class ChatStateService {
     const pendingDataCleared = 'pendingData' in state;
     const collectCleared = 'collect' in state;
     const flowCleared = 'flow' in state;
+    let flow: ChatFlowData | undefined;
+    if (!flowCleared) {
+      flow = existing?.flow;
+    } else if (!state.flow) {
+      flow = undefined;
+    } else {
+      flow = { ...state.flow };
+      // Escritas concorrentes de flow não podem apagar o takeover humano ativo:
+      // preserva a flag salva, salvo quando a escrita a declara explicitamente
+      // (null = liberação pelo operador via clearHumanTakeoverSync).
+      if (
+        !('humanTakeoverUntil' in state.flow) &&
+        typeof existing?.flow?.humanTakeoverUntil === 'number'
+      ) {
+        flow.humanTakeoverUntil = existing.flow.humanTakeoverUntil;
+      }
+      if (flow.humanTakeoverUntil == null) delete flow.humanTakeoverUntil;
+    }
     return {
       stage: state.stage ?? existing?.stage ?? 'COLLECTING',
       collect: collectCleared ? state.collect ?? undefined : existing?.collect,
       pendingData: pendingDataCleared ? state.pendingData ?? undefined : existing?.pendingData,
-      flow: flowCleared ? state.flow ?? undefined : existing?.flow,
+      flow,
       createdAt: existing?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
     };
@@ -231,9 +249,20 @@ class ChatStateService {
     await this.setState(contactId, { stage: 'COLLECTING', pendingData: null });
   }
 
-  /** Reinício completo (coleta + confirmação + roteiro) — ver resetState. */
+  /** Reinício completo (coleta + confirmação + roteiro) — ver resetState.
+   *  PRESERVA takeover humano ativo (ex.: webhook de pagamento chega durante
+   *  atendimento humano — o bot não pode voltar a atropelar o operador). */
   async resetFlowState(contactId: string): Promise<void> {
-    await this.setState(contactId, { stage: 'COLLECTING', pendingData: null, collect: null, flow: null });
+    const id = sanitizeContactId(contactId);
+    const existing = this.readStateSync(id);
+    const takeoverUntil = existing?.flow?.humanTakeoverUntil;
+    const keepTakeover = typeof takeoverUntil === 'number' && takeoverUntil > Date.now();
+    await this.setState(contactId, {
+      stage: 'COLLECTING',
+      pendingData: null,
+      collect: null,
+      flow: keepTakeover ? { humanTakeoverUntil: takeoverUntil } : null,
+    });
   }
 
   /**
@@ -272,8 +301,8 @@ class ChatStateService {
     const id = sanitizeContactId(contactId);
     const existing = this.readStateSync(id);
     if (!existing?.flow?.humanTakeoverUntil) return;
-    const nextFlow: ChatFlowData = { ...existing.flow };
-    delete nextFlow.humanTakeoverUntil;
+    // null = liberação EXPLÍCITA — o merge do buildState não reintroduz a flag.
+    const nextFlow: ChatFlowData = { ...existing.flow, humanTakeoverUntil: null };
     const next = this.buildState(existing, { flow: nextFlow });
     getDb()
       .prepare(

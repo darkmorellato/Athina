@@ -8,6 +8,7 @@
  */
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { LRUCache } from 'lru-cache';
 import chatStateService from '../ChatStateService.js';
 import analyticsService from '../AnalyticsService.js';
 import whatsAppService from '../WhatsAppService.js';
@@ -24,6 +25,72 @@ export const paymentWebhookPayloadSchema = z.object({
 });
 
 export type PaymentWebhookPayload = z.infer<typeof paymentWebhookPayloadSchema>;
+
+/** Resultado do processamento de um webhook de pagamento. */
+export interface WebhookProcessResult {
+  status: number;
+  notified: boolean;
+  contactId: string | null;
+  duplicate?: boolean;
+}
+
+/** Requisição bruta de webhook (payload + corpo + assinatura). */
+export interface WebhookRequest {
+  rawBody: string;
+  body: unknown;
+  signatureHeader?: string;
+  secret: string;
+}
+
+/**
+ * Hash SHA-256 dos corpos já processados — deduplica replay por 24h.
+ * Volume de webhooks é baixo; o LRU limita a memória se houver ataque de flood.
+ */
+const processedWebhookHashes = new LRUCache<string, true>({ max: 5000, ttl: 24 * 60 * 60 * 1000 });
+
+/**
+ * Processa um webhook de pagamento validando a assinatura HMAC-SHA256 sobre os
+ * BYTES BRUTOS do corpo (nunca sobre uma reserialização JSON — espaçamento,
+ * unicode e formatação numérica do emissor são preservados) e deduplicando
+ * replay por hash do corpo assinado.
+ */
+export async function handleWebhookRequest(
+  req: WebhookRequest,
+  deps?: { sendMessage?: (to: string, text: string) => Promise<void> }
+): Promise<WebhookProcessResult> {
+  const { rawBody, body, signatureHeader, secret } = req;
+
+  if (!verifyWebhookSignature(rawBody, signatureHeader, secret)) {
+    logger.warn('Rejected payment webhook with invalid HMAC signature');
+    return { status: 401, notified: false, contactId: null };
+  }
+
+  const hash = crypto.createHash('sha256').update(rawBody, 'utf8').digest('hex');
+  if (processedWebhookHashes.has(hash)) {
+    logger.info({ hash: hash.slice(0, 12) }, '[PaymentWebhook] Replay ignorado (corpo já processado)');
+    return { status: 200, notified: false, contactId: null, duplicate: true };
+  }
+
+  try {
+    const result = await processPaymentWebhook(body ?? safeParse(rawBody), deps);
+    processedWebhookHashes.set(hash, true);
+    return { status: 200, ...result };
+  } catch {
+    return {
+      status: 400,
+      notified: false,
+      contactId: null,
+    };
+  }
+}
+
+function safeParse(rawBody: string): unknown {
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+}
 
 /** Gera a assinatura HMAC-SHA256 hexadecimal do corpo bruto do webhook. */
 export function signWebhookPayload(rawBody: string, secret: string): string {

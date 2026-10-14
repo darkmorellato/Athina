@@ -20,9 +20,12 @@ import { analyzeReceiptText, combineAnalyses } from '../src/services/helpers/rec
 import { describeReceiptForOperator } from '../src/services/AthinaFlowService.js';
 import {
   verifyWebhookSignature,
-  processPaymentWebhook,
   signWebhookPayload,
+  handleWebhookRequest,
 } from '../src/services/helpers/paymentWebhookHelper.js';
+import { DialogueNluService } from '../src/services/DialogueNluService.js';
+import chatStateService from '../src/services/ChatStateService.js';
+import { searchContracts } from '../src/services/helpers/paymobiApiHelper.js';
 
 const mutableConfig = config as unknown as { agentAutoReply: boolean };
 const originalAutoReply = mutableConfig.agentAutoReply;
@@ -633,32 +636,37 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    name: 'automação P3: webhook de confirmação de pagamento valida assinatura HMAC e notifica desbloqueio proativamente',
+    name: 'automação P3: webhook valida assinatura HMAC sobre os BYTES BRUTOS (corpo com espaçamento/unicode) e deduplica replay',
     run: async () => {
       const secret = 'segredo-webhook-teste';
-      const rawBody = JSON.stringify({
-        phone: '5511988887777',
-        customerName: 'Maria Silva',
-        installmentNumber: 4,
-        value: 'R$ 405,63',
-        status: 'paid',
-      });
+      // Corpo com identação e número não normalizado (1.0) — como provedores reais enviam
+      const rawBody = '{\n  "phone": "5511988887777",\n  "customerName": "João",\n  "value": 1.0,\n  "status": "paid"\n}';
       const validSig = signWebhookPayload(rawBody, secret);
 
       assert.equal(verifyWebhookSignature(rawBody, validSig, secret), true);
       assert.equal(verifyWebhookSignature(rawBody, 'assinatura-invalida', secret), false);
 
       const sentWebhook: SentMessage[] = [];
-      const res = await processPaymentWebhook(JSON.parse(rawBody), {
-        sendMessage: async (to, text) => {
-          sentWebhook.push({ to, text });
-        },
-      });
+      const deps = { sendMessage: async (to: string, text: string) => { sentWebhook.push({ to, text }); } };
+      const first = await handleWebhookRequest(
+        { rawBody, body: JSON.parse(rawBody), signatureHeader: validSig, secret },
+        deps
+      );
 
-      assert.equal(res.notified, true);
+      assert.equal(first.status, 200, 'corpo pretty-printed assinado corretamente deve ser aceito');
+      assert.equal(first.notified, true);
       assert.equal(sentWebhook.length, 1);
       assert.equal(sentWebhook[0].to, '5511988887777@c.us');
       assert.match(sentWebhook[0].text, /pagamento.*confirmado|recebemos/i);
+
+      // Replay do MESMO payload: não pode renotificar nem resetar estado de novo
+      const replay = await handleWebhookRequest(
+        { rawBody, body: JSON.parse(rawBody), signatureHeader: validSig, secret },
+        deps
+      );
+      assert.equal(replay.notified, false, 'replay não deve renotificar o cliente');
+      assert.equal(replay.duplicate, true);
+      assert.equal(sentWebhook.length, 1);
     },
   },
   {
@@ -718,6 +726,113 @@ const scenarios: Scenario[] = [
       assert.ok(idxAskDoc !== -1, 'o texto do buffer deve ser processado');
       assert.ok(idxMedia !== -1, 'a mídia deve receber a orientação');
       assert.ok(idxAskDoc < idxMedia, 'o texto em buffer deve vir ANTES da mídia seguinte');
+    },
+  },
+  {
+    name: 'P2: 3 respostas ininteligíveis em COLLECTING escalam para humano (sem loop infinito de boas-vindas)',
+    run: async () => {
+      const { flow, notified } = makeFlow({ consultarPaymobi: async () => NOT_FOUND });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'qual é o valor da minha fatura?', id: 'cl-1' });
+      assert.equal(notified.length, 0);
+      await flow.handleIncomingMessage({ from: contact, body: 'alguém me ajuda aí por favor', id: 'cl-2' });
+      assert.equal(notified.length, 0);
+      await flow.handleIncomingMessage({ from: contact, body: '12345', id: 'cl-3' });
+      assert.equal(notified.length, 1, 'deve escalar para humano após 3 tentativas em COLLECTING');
+      assert.match(notified[0].reason, /fallback|compreens/i);
+    },
+  },
+  {
+    name: 'P2: hostilidade escala para humano mesmo ANTES da identificação',
+    run: async () => {
+      const { flow, notified } = makeFlow();
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'isso é um golpe, vou no procon', id: 'ho-1' });
+      assert.equal(notified.length, 1, 'hostilidade deve escalar sem exigir identificação prévia');
+    },
+  },
+  {
+    name: 'P2: "quero falar com atendente" em BOLETO_CONFIRM transfere para humano e NÃO entrega o PIX',
+    run: async () => {
+      const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundUmAtraso() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'fp-1' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'fp-2' });
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: 'fp-3' }); // Pagar Boleto → BOLETO_CONFIRM
+      const before = sent.length;
+      await flow.handleIncomingMessage({ from: contact, body: 'quero falar com atendente', id: 'fp-4' });
+
+      assert.equal(notified.length, 1, 'pedido de atendente deve transferir, não confirmar');
+      assert.ok(
+        !sent.slice(before).some((m) => m.text.includes(PARCELA.pixCode)),
+        'NÃO deve entregar o código PIX quando o cliente pede atendente'
+      );
+      assert.ok(
+        !sent.slice(before).some((m) => /Agradecemos o seu contato/.test(m.text)),
+        'NÃO deve encerrar a conversa'
+      );
+    },
+  },
+  {
+    name: 'P0: resetFlowState (fim de fluxo ou webhook) preserva takeover humano ativo',
+    run: async () => {
+      const a = makeFlow();
+      const contact = newContact();
+      a.flow.noteHumanReply(contact);
+      await chatStateService.resetFlowState(contact); // ex.: webhook de pagamento chega durante atendimento humano
+
+      const b = makeFlow();
+      await b.flow.handleIncomingMessage({ from: contact, body: 'oi', id: 'tk-1' });
+      assert.equal(b.sent.length, 0, 'takeover deve continuar ativo após resetFlowState');
+
+      b.flow.releaseHumanTakeover(contact);
+      await b.flow.handleIncomingMessage({ from: contact, body: 'oi', id: 'tk-2' });
+      assert.equal(b.sent.length, 1, 'após liberação explícita, a Athina volta a responder');
+    },
+  },
+  {
+    name: 'P2: fallback LLM do NLU (enableLlmFallback) classifica quando o fast-path não resolve',
+    run: async () => {
+      const fakeLlm = async () => ({
+        intent: 'VERIFICAR_SALDO' as const,
+        confidence: 0.9,
+        extractedName: null,
+        extractedDoc: null,
+        paymentMethod: null,
+        sentiment: 'NEUTRAL' as const,
+        contextualReply: null,
+        deferredIntent: 'VERIFICAR_SALDO' as const,
+      });
+      const nlu = new DialogueNluService({ llmClassify: fakeLlm });
+      const decision = await nlu.interpret({
+        text: 'quanto que eu devo nesse instante',
+        stage: 'MAIN_MENU',
+        enableLlmFallback: true,
+      });
+      assert.equal(decision.intent, 'VERIFICAR_SALDO', 'o fallback LLM deve classificar o que o fast-path não resolve');
+    },
+  },
+  {
+    name: 'P1: 401 do Paymobi propaga como erro de autenticação (nunca vira "não encontramos cadastro")',
+    run: async () => {
+      const authErr = Object.assign(new Error('Request failed with status code 401'), {
+        isAxiosError: true,
+        response: { status: 401 },
+      });
+      let calls = 0;
+      await assert.rejects(
+        () =>
+          searchContracts('token-antigo', '52998224725', 'Maria Silva', async () => {
+            calls += 1;
+            throw authErr;
+          }),
+        (err: unknown) => {
+          const status = (err as { response?: { status?: number } }).response?.status;
+          return status === 401;
+        },
+        '401 deve propagar para o chamador renovar o token'
+      );
+      assert.ok(calls >= 1);
     },
   },
   {

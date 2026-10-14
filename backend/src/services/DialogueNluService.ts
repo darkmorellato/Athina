@@ -22,6 +22,7 @@ import type { DeferredIntent } from '@shared/contracts.js';
 import type { ChatStage } from './ChatStateService.js';
 import { getChatModel } from './aiProvider.js';
 import config from '../config/index.js';
+import logger from '../utils/logger.js';
 import trainingService from './TrainingService.js';
 
 export const nluIntentSchema = z.enum([
@@ -57,11 +58,44 @@ export type NluDecision = z.infer<typeof nluDecisionSchema> & {
   deferredIntent: DeferredIntent | null;
 };
 
+/** Resultado do classificador LLM (sem os campos que o interpret deriva). */
+export interface NluLlmResult {
+  intent: NluIntent;
+  confidence: number;
+  extractedName: string | null;
+  paymentMethod: 'pix' | 'boleto' | null;
+  sentiment: NluDecision['sentiment'];
+  contextualReply: string | null;
+  extractedDoc?: ExtractedDocument | null;
+  deferredIntent?: DeferredIntent | null;
+}
+
+export interface DialogueNluDeps {
+  /** Classificador estruturado injetável (testes / alternativa ao generateObject). */
+  llmClassify?: (params: { text: string; stage: ChatStage }) => Promise<NluLlmResult>;
+}
+
+const DEFERRED_INTENTS = new Set<DeferredIntent>([
+  'PAGAR_BOLETO',
+  'VERIFICAR_SALDO',
+  'CELULAR_BLOQUEADO',
+  'INFORMAR_JA_PAGUEI',
+  'FALAR_COM_ATENDENTE',
+]);
+
 const HOSTILE_REGEX =
   /\b(procon|processar|advogado|justi[cç]a|pol[ií]cia|golpe|ladr[aã]o|roubo|lixo|porra|caralho|merda|inferno|palha[cç]ada|absurdo|enganad[oa])\b/i;
 
-const CONFIRM_YES_REGEX =
-  /^(?:1|sim|s|isso|isso\s+mesmo|correto|est[aá]\s+certo|est[aá]\s+correto|quero|pode|pode\s+mandar|pode\s+enviar|ok|confirmo|claro|com\s+certeza)(?:\b|[\s,!.?])/i;
+/**
+ * Confirmações "fortes" (começam a frase): 1 / sim / ok / está certo…
+ * Confirmações "fracas" (quero / pode) só valem quando a mensagem INTEIRA é
+ * uma confirmação ("quero", "pode mandar", "quero o boleto") — nunca
+ * "quero falar com atendente" ou "quero trocar o dia de vencimento".
+ */
+const STRONG_CONFIRM_YES_REGEX =
+  /^(?:1|sim|s|isso|isso\s+mesmo|correto|est[aá]\s+(?:certo|correto)|ok|confirmo|claro|com\s+certeza)\b/i;
+const WEAK_CONFIRM_YES_REGEX =
+  /^(?:quero|pode)(?:\s+(?:por\s+favor|pf|manda(?:r)?|enviar|(?:o|meu)\s+boleto|mandar\s+(?:o|meu)\s+boleto))?[!.?]*$/i;
 
 const CONFIRM_NO_REGEX =
   /^(?:2|n[aã]o|nao|n|errado|incorreto|est[aã]o\s+errados|est[aá]\s+errado|n[aã]o\s+quero|negativo|n[aã]o\s+obrigad[oa])(?:\b|[\s,!.?])/i;
@@ -80,6 +114,11 @@ function detectPaymentMethod(text: string): 'pix' | 'boleto' | null {
   if (/\bpix\b/i.test(text)) return 'pix';
   if (/\b(c[oó]digo\s+de\s+barras|boleto|lot[eé]rica|banc[oó])\b/i.test(text)) return 'boleto';
   return null;
+}
+
+/** Confirmação de sim: frase forte OU frase inteira de confirmação fraca. */
+function isConfirmYes(clean: string): boolean {
+  return STRONG_CONFIRM_YES_REGEX.test(clean) || WEAK_CONFIRM_YES_REGEX.test(clean);
 }
 
 /**
@@ -135,6 +174,39 @@ export function detectDomainIntent(text: string): DeferredIntent | null {
 }
 
 export class DialogueNluService {
+  private readonly deps: DialogueNluDeps;
+
+  constructor(deps?: DialogueNluDeps) {
+    this.deps = deps ?? {};
+  }
+
+  /** Classificação LLM: usa o classificador injetado ou `generateObject` do AI SDK. */
+  private async classifyWithLlm(clean: string, stage: ChatStage): Promise<NluLlmResult | null> {
+    if (this.deps.llmClassify) {
+      return this.deps.llmClassify({ text: clean.slice(0, 800), stage });
+    }
+    if (!config.aiApiKey) return null;
+
+    logger.info({ stage }, '[NLU] Fast-path não resolveu — classificando via LLM');
+    const modelId = config.aiModel || 'nvidia/nemotron-3.5-lightning-30b-a3b';
+    const trainingBlock = trainingService.getPromptBlock(10, clean);
+    const { object } = await generateObject({
+      model: getChatModel(modelId),
+      schema: nluDecisionSchema,
+      temperature: 0.1,
+      maxOutputTokens: 300,
+      abortSignal: AbortSignal.timeout(6_000),
+      system: [
+        'Você é o classificador NLU da Athina (Financeira Nuovopay).',
+        `Estágio atual: ${stage}.`,
+        'Nunca invente valores, links ou promessas fora das regras.',
+        trainingBlock,
+      ].join('\n\n'),
+      prompt: `<mensagem_cliente>\n${clean.slice(0, 800)}\n</mensagem_cliente>`,
+    });
+    return object;
+  }
+
   /**
    * Analisa a mensagem do cliente considerando o estágio atual da máquina de estados.
    * Extrai simultaneamente entidades (nome, documento, método de pagamento) e a intenção.
@@ -164,33 +236,29 @@ export class DialogueNluService {
     });
     if (stageResolved) return stageResolved;
 
-    // 2. Fallback opcional para LLM Structured Output (generateObject) quando habilitado
-    if (params.enableLlmFallback && config.aiApiKey) {
+    // 2. Fallback opcional para LLM Structured Output quando habilitado
+    if (params.enableLlmFallback) {
       try {
-        const modelId = config.aiModel || 'nvidia/nemotron-3.5-lightning-30b-a3b';
-        const trainingBlock = trainingService.getPromptBlock(10, clean);
-        const { object } = await generateObject({
-          model: getChatModel(modelId),
-          schema: nluDecisionSchema,
-          temperature: 0.1,
-          maxOutputTokens: 300,
-          abortSignal: AbortSignal.timeout(6_000),
-          system: [
-            'Você é o classificador NLU da Athina (Financeira Nuovopay).',
-            `Estágio atual: ${params.stage}.`,
-            'Nunca invente valores, links ou promessas fora das regras.',
-            trainingBlock,
-          ].join('\n\n'),
-          prompt: `<mensagem_cliente>\n${clean.slice(0, 800)}\n</mensagem_cliente>`,
-        });
-        return {
-          ...object,
-          extractedName: extractedName ?? object.extractedName,
-          extractedDoc,
-          deferredIntent: domainIntent,
-        };
-      } catch {
-        /* Degrada silenciosamente para UNKNOWN */
+        const object = await this.classifyWithLlm(clean, params.stage);
+        if (object) {
+          return {
+            ...object,
+            extractedName: extractedName ?? object.extractedName,
+            extractedDoc: object.extractedDoc ?? extractedDoc,
+            deferredIntent:
+              domainIntent ??
+              (object.deferredIntent && DEFERRED_INTENTS.has(object.deferredIntent)
+                ? object.deferredIntent
+                : DEFERRED_INTENTS.has(object.intent as DeferredIntent)
+                  ? (object.intent as DeferredIntent)
+                  : null),
+          };
+        }
+      } catch (err) {
+        logger.warn(
+          { error: err instanceof Error ? err.message : String(err) },
+          '[NLU] Fallback LLM indisponível — degradando para UNKNOWN'
+        );
       }
     }
 
@@ -254,14 +322,17 @@ export class DialogueNluService {
       stage === 'SALDO_FOLLOWUP' ||
       stage === 'HUMAN_TOPIC_CONFIRM'
     ) {
-      if (clean === '1' || CONFIRM_YES_REGEX.test(clean)) {
+      // Pedido de atendente tem prioridade MÁXIMA: "quero falar com atendente"
+      // começava com "quero" e era classificado como CONFIRM_YES — o bot
+      // entregava o PIX e encerrava a conversa ignorando o pedido de humano.
+      if (domainIntent === 'FALAR_COM_ATENDENTE') {
+        return { ...base, intent: 'FALAR_COM_ATENDENTE' };
+      }
+      if (clean === '1' || isConfirmYes(clean)) {
         return { ...base, intent: 'CONFIRM_YES' };
       }
       if (clean === '2' || CONFIRM_NO_REGEX.test(clean)) {
         return { ...base, intent: 'CONFIRM_NO' };
-      }
-      if (domainIntent === 'FALAR_COM_ATENDENTE') {
-        return { ...base, intent: 'FALAR_COM_ATENDENTE' };
       }
       return null;
     }

@@ -49,6 +49,8 @@ interface WhatsAppPanelProps {
   unreadMark?: UnreadMark;
   /** Envia imagem (colada/arrastada) como resposta no WhatsApp */
   sendFile: (to: string, base64: string, mimetype: SendFileReplyPayload['mimetype'], filename: string, caption: string) => void;
+  /** Devolve o contato selecionado para o atendimento automático da Athina */
+  onReleaseTakeover?: (contactId: string) => void;
 }
 
 /** Linha da barra lateral: contato + chave de ordenação (atividade). */
@@ -65,6 +67,7 @@ function WhatsAppPanel({
   avatars, requestAvatars,
   sendFile,
   unreadCounts, unreadMark,
+  onReleaseTakeover,
 }: WhatsAppPanelProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('chats');
   const [searchQuery, setSearchQuery] = useState('');
@@ -322,7 +325,8 @@ function WhatsAppPanel({
                 hasMore={selectedMeta?.hasMore ?? false}
                 isLoadingOlder={selectedMeta?.loading ?? false}
                 historyLoaded={Boolean(selectedMeta && !selectedMeta.loading)}
-                onLoadOlder={handleLoadOlder} />
+                onLoadOlder={handleLoadOlder}
+                onReleaseTakeover={onReleaseTakeover} />
               {forwardSource?.serializedId && (
                 <ForwardModal
                   contacts={contacts}

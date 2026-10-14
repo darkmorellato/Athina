@@ -64,6 +64,21 @@ describe('shared/validators — validação algorítmica e extração segura', (
     expect(extractPlausibleDocument('(11) 98765-4321')).toBeNull();
   });
 
+  it('extrai CPF válido mesmo quando o texto também menciona telefone', () => {
+    expect(extractPlausibleDocument('meu celular é 11 98765-4321 e meu cpf é 529.982.247-25')).toEqual({
+      type: 'cpf',
+      digits: '52998224725',
+      checksumValid: true,
+    });
+    // heurística de telefone só se aplica quando NENHUM candidato tem checksum válido
+    expect(extractPlausibleDocument('meu zap é 11 98765-4321')).toBeNull();
+    // blocos numéricos adjacentes não podem fundir em um candidato só
+    const adjacentes = extractPlausibleDocument('52998224725 356938035643809');
+    expect(adjacentes).not.toBeNull();
+    // candidato com checksum válido tem prioridade sobre o primeiro da ordem
+    expect(extractPlausibleDocument('11987654321 meu cpf é 52998224725')?.digits).toBe('52998224725');
+  });
+
   it('compartilha sanitizeForWhatsApp, isGreeting e isFullName entre front e back', () => {
     expect(sanitizeForWhatsApp('**Olá** CPF: 123.456.789-01')).toBe('*Olá* CPF: ***.456.789-**');
     expect(isGreeting('Bom dia!')).toBe(true);

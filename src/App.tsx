@@ -48,6 +48,7 @@ export default function App() {
     updateTrainingQas,
     refreshStats,
     resetStats,
+    releaseHumanTakeover,
   } = useSocket();
 
   const [leftPanelWidth, setLeftPanelWidth] = useState(60);
@@ -102,6 +103,7 @@ export default function App() {
           avatars={avatars}
           requestAvatars={requestAvatars}
           sendFile={sendFile}
+          onReleaseTakeover={releaseHumanTakeover}
         />
       </div>
 

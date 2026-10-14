@@ -42,10 +42,16 @@ async function postSearch(token: string, body: Record<string, string>): Promise<
 
 const onlyDigits = (value: unknown): string => String(value ?? '').replace(/\D/g, '');
 
+function isUnauthorizedError(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } } | null | undefined)?.response?.status;
+  return status === 401;
+}
+
 export async function searchContracts(
   token: string,
   query: string,
-  clientName?: string
+  clientName?: string,
+  postFn: (token: string, body: Record<string, string>) => Promise<PaymobiContract[]> = postSearch
 ): Promise<PaymobiContract[]> {
   const cleanQuery = onlyDigits(query);
   const isImei = cleanQuery.length === 15;
@@ -54,7 +60,7 @@ export async function searchContracts(
   if (isImei) {
     // LGPD: nunca logar o IMEI cru — só o formato mascarado.
     logger.info({ imei: maskDocument(cleanQuery) }, '[PaymobiScraperService] Searching by IMEI');
-    return postSearch(token, { search: cleanQuery });
+    return postFn(token, { search: cleanQuery });
   }
 
   const nameToSearch = (clientName || query).trim();
@@ -68,8 +74,9 @@ export async function searchContracts(
   logger.info({ name: maskName(nameToSearch) }, '[PaymobiScraperService] Attempting Strategy A: Exact Name');
   let contracts: PaymobiContract[] = [];
   try {
-    contracts = await postSearch(token, { customerName: nameToSearch });
+    contracts = await postFn(token, { customerName: nameToSearch });
   } catch (err) {
+    if (isUnauthorizedError(err)) throw err;
     logger.warn({ error: errorMessage(err) }, '[PaymobiScraperService] Strategy A failed');
   }
 
@@ -78,9 +85,10 @@ export async function searchContracts(
     const partialName = `${words[0]} ${words[1]}`;
     logger.info({ partialName: maskName(partialName) }, '[PaymobiScraperService] Attempting Strategy B: First Two Words');
     try {
-      const partial = await postSearch(token, { customerName: partialName });
+      const partial = await postFn(token, { customerName: partialName });
       if (partial.length > 0) contracts = partial;
     } catch (err) {
+      if (isUnauthorizedError(err)) throw err;
       logger.warn({ error: errorMessage(err) }, '[PaymobiScraperService] Strategy B failed');
     }
   }
@@ -90,9 +98,10 @@ export async function searchContracts(
     const firstName = words[0];
     logger.info({ firstName: maskName(firstName) }, '[PaymobiScraperService] Attempting Strategy C: First Word');
     try {
-      const partial = await postSearch(token, { customerName: firstName });
+      const partial = await postFn(token, { customerName: firstName });
       if (partial.length > 0) contracts = partial;
     } catch (err) {
+      if (isUnauthorizedError(err)) throw err;
       logger.warn({ error: errorMessage(err) }, '[PaymobiScraperService] Strategy C failed');
     }
   }

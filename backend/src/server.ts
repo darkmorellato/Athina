@@ -15,7 +15,7 @@ import chatStateService from './services/ChatStateService.js';
 import { closeSharedBrowser } from './services/PaymobiScraperService.js';
 import SocketController from './controllers/SocketController.js';
 import athinaFlowService from './services/AthinaFlowService.js';
-import { verifyWebhookSignature, processPaymentWebhook } from './services/helpers/paymentWebhookHelper.js';
+import { handleWebhookRequest } from './services/helpers/paymentWebhookHelper.js';
 import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import logger from './utils/logger.js';
 import { initLlmTracing } from './services/llmTracer.js';
@@ -67,7 +67,16 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: '1mb' }));
+app.use(
+  express.json({
+    limit: '1mb',
+    // Preserva os BYTES BRUTOS do corpo: assinaturas HMAC de webhooks são
+    // calculadas sobre o que o emissor enviou, não sobre uma reserialização.
+    verify: (req, _res, buf) => {
+      (req as { rawBody?: string }).rawBody = buf.toString('utf8');
+    },
+  })
+);
 
 // Security fix: Global HTTP rate limiting (skip Socket.IO transport to avoid breaking realtime)
 const httpRateLimiter = rateLimit({
@@ -206,19 +215,22 @@ app.post('/webhooks/payment', async (req, res) => {
     res.status(503).json({ error: 'Payment webhook is not configured on this server.' });
     return;
   }
-  const signature = req.header('x-webhook-signature') ?? undefined;
-  const rawBody = JSON.stringify(req.body ?? {});
-  if (!verifyWebhookSignature(rawBody, signature, secret)) {
-    logger.warn('Rejected payment webhook with invalid HMAC signature');
+  const rawBody = (req as { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
+  const result = await handleWebhookRequest({
+    rawBody,
+    body: req.body,
+    signatureHeader: req.header('x-webhook-signature') ?? undefined,
+    secret,
+  });
+  if (result.status === 401) {
     res.status(401).json({ error: 'Invalid webhook signature' });
     return;
   }
-  try {
-    const result = await processPaymentWebhook(req.body);
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid payload' });
+  if (result.status === 400) {
+    res.status(400).json({ error: 'Invalid payload' });
+    return;
   }
+  res.json({ ok: true, ...result });
 });
 
 const PORT = config.port;

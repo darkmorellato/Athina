@@ -327,12 +327,13 @@ export class AthinaFlowService {
       recentTurns: state.flow?.recentTurns,
     });
 
-    // Escalonamento imediato por sentimento hostil quando o cliente já está identificado
-    if (nlu.sentiment === 'HOSTILE' && state.flow?.client) {
+    // Escalonamento imediato por sentimento hostil — inclusive ANTES da
+    // identificação (clientForHandoff trata "Não identificado").
+    if (nlu.sentiment === 'HOSTILE') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('atender sua solicitação com prioridade'));
       await this.handoffToHumans({
         contactId,
-        client: this.clientForHandoff(state.flow),
+        client: this.clientForHandoff(state.flow ?? {}),
         reason: 'Cliente insatisfeito / linguagem hostil detectada',
         details: `Escalonamento automático por sentimento hostil na etapa ${state.stage}: "${effectiveText.slice(0, 300)}"`,
       });
@@ -481,18 +482,28 @@ export class AthinaFlowService {
     }
 
     if (activeName && activeDoc) {
-      await this.reply(
+      await this.handleStageFallback(
         contactId,
+        'COLLECTING',
+        flowMeta,
+        '',
+        text,
         'Seus dados já estão preenchidos. Para eu consultar novamente, envie o seu *CPF* ou *IMEI* uma vez, por favor.'
       );
       return;
     }
     if (activeName) {
-      await chatStateService.setState(contactId, { stage: 'COLLECTING', flow: flowMeta });
-      await this.reply(contactId, msg.buildAskDocText(activeName));
+      await this.handleStageFallback(
+        contactId,
+        'COLLECTING',
+        flowMeta,
+        '',
+        text,
+        msg.buildAskDocText(activeName)
+      );
       return;
     }
-    await this.reply(contactId, msg.buildWelcomeText());
+    await this.handleStageFallback(contactId, 'COLLECTING', flowMeta, '', text, msg.buildWelcomeText());
   }
 
   private async runLookup(
@@ -717,8 +728,16 @@ export class AthinaFlowService {
       return;
     }
     if (nlu.intent === 'FALAR_COM_ATENDENTE') {
-      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', { ...flow, fallbackCount: 0 });
-      await this.reply(contactId, msg.buildHumanTopicText());
+      // Pedido explícito de humano durante a confirmação: transfere na hora,
+      // sem entregar PIX e sem encerrar como atendimento resolvido.
+      await this.reply(contactId, msg.buildTransferToSpecialistText('falar com nosso especialista'));
+      await this.handoffToHumans({
+        contactId,
+        client: this.clientForHandoff(flow),
+        reason: 'Falar com atendente',
+        details: `Cliente pediu atendente durante a confirmação do boleto. Mensagem: "${text.slice(0, 300)}"`,
+      });
+      await chatStateService.resetFlowState(contactId);
       return;
     }
     if (!flow.client || !flow.parcela) {
@@ -777,7 +796,7 @@ export class AthinaFlowService {
     nlu: NluDecision
   ): Promise<void> {
     const flow = state.flow ?? {};
-    if (nlu.intent === 'CONFIRM_YES' || nlu.intent === 'BACK_TO_MENU') {
+    if (nlu.intent === 'CONFIRM_YES' || nlu.intent === 'FALAR_COM_ATENDENTE') {
       await chatStateService.setFlowState(contactId, 'MAIN_MENU', { ...flow, fallbackCount: 0 });
       await this.reply(contactId, msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' }));
       return;
@@ -929,7 +948,7 @@ export class AthinaFlowService {
     nlu: NluDecision
   ): Promise<void> {
     const flow = state.flow ?? {};
-    if (nlu.intent === 'CONFIRM_YES') {
+    if (nlu.intent === 'CONFIRM_YES' || nlu.intent === 'FALAR_COM_ATENDENTE') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('falar com nosso especialista'));
       await this.handoffToHumans({
         contactId,
@@ -956,7 +975,7 @@ export class AthinaFlowService {
 
   /**
    * Tratamento de fallback progressivo:
-   * - Tentativas 1 e 2: reapresenta as opções da etapa atual.
+   * - Tentativas 1 e 2: reapresenta as opções da etapa atual (ou `retryText`).
    * - Tentativa 3 (MAX_FALLBACK_STRIKES): transfere automaticamente para atendente humano.
    */
   private async handleStageFallback(
@@ -964,7 +983,8 @@ export class AthinaFlowService {
     stage: ChatStage,
     flow: ChatFlowData,
     menuText: string,
-    userText: string
+    userText: string,
+    retryText?: string
   ): Promise<void> {
     const strikes = (flow.fallbackCount ?? 0) + 1;
     if (strikes >= MAX_FALLBACK_STRIKES) {
@@ -979,7 +999,7 @@ export class AthinaFlowService {
       return;
     }
     await chatStateService.setFlowState(contactId, stage, { ...flow, fallbackCount: strikes });
-    await this.reply(contactId, msg.buildInvalidMenuChoiceText(menuText));
+    await this.reply(contactId, retryText ?? msg.buildInvalidMenuChoiceText(menuText));
   }
 
   // ─── Helpers compartilhados ─────────────────────────────────────────────────

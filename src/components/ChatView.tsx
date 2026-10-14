@@ -30,6 +30,8 @@ interface ChatViewProps {
   /** O histórico da conversa já terminou de carregar (1ª vez)? */
   historyLoaded?: boolean;
   onLoadOlder?: () => void;
+  /** Devolve o contato para o atendimento automático da Athina */
+  onReleaseTakeover?: (contactId: string) => void;
 }
 
 export const ChatView = memo(function ChatView({
@@ -44,6 +46,7 @@ export const ChatView = memo(function ChatView({
   isLoadingOlder,
   historyLoaded,
   onLoadOlder,
+  onReleaseTakeover,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [failedAvatar, setFailedAvatar] = useState<string | null>(null);
@@ -208,10 +211,21 @@ export const ChatView = memo(function ChatView({
             <span>{contactName[0]}</span>
           )}
         </div>
-        <div className="flex flex-col min-w-0">
+        <div className="flex flex-col min-w-0 flex-1">
           <h3 className="wa-chat-name truncate">{contactName}</h3>
           <span className="wa-chat-sub">{isAgentTyping ? 'digitando…' : 'cliente ativo'}</span>
         </div>
+        {onReleaseTakeover && (
+          <button
+            type="button"
+            onClick={() => onReleaseTakeover(selectedContact)}
+            title="Reativar atendimento automático da Athina para este contato"
+            className="ml-auto px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors flex items-center gap-1.5 shrink-0"
+          >
+            <Bot size={13} />
+            <span>Devolver à Athina</span>
+          </button>
+        )}
       </header>
 
       {/* Messages — select-text reativa a seleção desativada na raiz (select-none)
