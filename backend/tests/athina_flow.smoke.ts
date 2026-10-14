@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import { AthinaFlowService } from '../src/services/AthinaFlowService.js';
 import config from '../src/config/index.js';
 import type { PaymobiResult } from '../src/types/index.js';
-import { classifyReceiptText } from '../src/services/helpers/receiptAnalysisHelper.js';
+import { analyzeReceiptText, combineAnalyses } from '../src/services/helpers/receiptAnalysisHelper.js';
+import { describeReceiptForOperator } from '../src/services/AthinaFlowService.js';
 
 const mutableConfig = config as unknown as { agentAutoReply: boolean };
 const originalAutoReply = mutableConfig.agentAutoReply;
@@ -113,7 +114,7 @@ function makeFlow(overrides?: {
         ? overrides.consultarPaymobi(query, clientName)
         : NOT_FOUND;
     },
-    analyzeReceipt: async () => overrides?.receiptKind ?? 'PIX',
+    analyzeReceipt: async () => ({ kind: overrides?.receiptKind ?? 'PIX', confidence: 'alta' as const, evidence: ['teste'] }),
     notifyHumans: async (payload) => {
       notified.push(payload);
     },
@@ -156,9 +157,9 @@ const scenarios: Scenario[] = [
     run: async () => {
       const analyzed: string[] = [];
       const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundUmAtraso(), receiptKind: 'BOLETO' });
-      (flow as unknown as { deps: { analyzeReceipt: (m: { mimetype: string }) => Promise<string> } }).deps.analyzeReceipt = async (m) => {
+      (flow as unknown as { deps: { analyzeReceipt: (m: { mimetype: string }) => Promise<unknown> } }).deps.analyzeReceipt = async (m) => {
         analyzed.push(m.mimetype);
-        return 'BOLETO';
+        return { kind: 'BOLETO', confidence: 'alta', evidence: [] };
       };
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'w1' });
@@ -173,14 +174,53 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    name: 'comprovantes: regra de texto separa boleto (inclusive títulos) de PIX',
+    name: 'análise de comprovante: evidências fortes, rodapé de PIX em boleto e conflito',
     run: async () => {
-      assert.equal(classifyReceiptText('Comprovante de Pagamento de Títulos Código de barras 5099'), 'BOLETO');
-      assert.equal(classifyReceiptText('Linha digitável 23790.00000 60000'), 'BOLETO');
-      assert.equal(classifyReceiptText('Transferência PIX efetivada R$ 405,63'), 'PIX');
+      // texto real do comprovante Santander (OCR)
+      const santander = analyzeReceiptText('Comprovante de Pagamento de Títulos Código de barras 50950.00001 Valor Total R$ 405,63');
+      assert.equal(santander.kind, 'BOLETO');
+      assert.equal(santander.confidence, 'media', 'título sem linha digitável fica com confiança média');
+      const ocrSantander = analyzeReceiptText('Código de barras 50950.00001 00000000000000133533933334195000000 4 Valor R$ 405,63');
+      assert.equal(ocrSantander.kind, 'BOLETO');
+      assert.equal(ocrSantander.confidence, 'alta', 'OCR com dígitos separados por espaço conta como código de barras');
+      const linha = analyzeReceiptText('Linha digitável 23790.00000 60000.000000 00000.000000 1 99990000040563');
+      assert.equal(linha.kind, 'BOLETO');
+      assert.equal(linha.confidence, 'alta');
+      const pix = analyzeReceiptText('Transferência PIX efetivada. Identificador E12345678202610101432ABCDE123456');
+      assert.equal(pix.kind, 'PIX');
+      assert.equal(pix.confidence, 'alta');
       // boleto que cita PIX no rodapé continua sendo boleto
-      assert.equal(classifyReceiptText('Código de barras ... pague também via pix'), 'BOLETO');
-      assert.equal(classifyReceiptText('texto qualquer sem termos'), 'INDEFINIDO');
+      assert.equal(analyzeReceiptText('Linha digitável 23790.00000 60000.000000 pague também via pix').kind, 'BOLETO');
+      // linha de boleto e ID de PIX juntos: não decide
+      assert.equal(analyzeReceiptText('Linha digitável 23790.00000 60000.000000 E12345678202610101432ABCDE123456').kind, 'INDEFINIDO');
+      assert.equal(analyzeReceiptText('texto qualquer sem termos').kind, 'INDEFINIDO');
+    },
+  },
+  {
+    name: 'análise de comprovante: visão confirma, discorda ou falta',
+    run: async () => {
+      const boleto = analyzeReceiptText('Linha digitável 23790.00000 60000.000000 00000.000000 1 99990000040563');
+      assert.equal(combineAnalyses(boleto, 'BOLETO').confidence, 'alta');
+      assert.equal(combineAnalyses(boleto, 'PIX').kind, 'INDEFINIDO', 'texto e visão discordando não decide');
+      const semVisao = combineAnalyses(boleto, null);
+      assert.equal(semVisao.kind, 'BOLETO');
+      assert.ok(semVisao.evidence.some((e) => /indisponível/.test(e)));
+      const soVisao = combineAnalyses(analyzeReceiptText('sem termos'), 'PIX');
+      assert.equal(soVisao.kind, 'PIX');
+      assert.equal(soVisao.confidence, 'media');
+    },
+  },
+  {
+    name: 'operador vê divergência quando o cliente diz PIX e o comprovante é boleto',
+    run: async () => {
+      const analysis = { kind: 'BOLETO' as const, confidence: 'alta' as const, evidence: ['linha digitável'] };
+      const texto = describeReceiptForOperator(analysis, 'pix');
+      assert.match(texto, /DIVERGÊNCIA/);
+      assert.match(texto, /Sinais: linha digitável/);
+      const ok = describeReceiptForOperator(analysis, 'boleto');
+      assert.doesNotMatch(ok, /DIVERGÊNCIA/);
+      const indef = describeReceiptForOperator({ kind: 'INDEFINIDO', confidence: 'baixa', evidence: [] }, undefined);
+      assert.match(indef, /Não foi possível confirmar/);
     },
   },
   {

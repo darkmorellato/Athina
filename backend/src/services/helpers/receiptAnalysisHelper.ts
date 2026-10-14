@@ -2,15 +2,18 @@
  * @fileoverview Leitura e classificação (PIX vs. boleto) de comprovante de
  * pagamento recebido no fluxo de "celular bloqueado".
  *
- * Pipeline:
- *  1. PDF → converte a primeira página em PNG (pdftoppm).
- *  2. OCR hospedado da NVIDIA (nemotron-ocr-v2) lê o texto da imagem.
- *  3. Regra fixa sobre o texto decide PIX ou BOLETO.
- *  4. Se o texto não bastar (foto ruim, layout estranho), um modelo de visão
- *     da NVIDIA (llama-3.2-90b-vision-instruct) classifica a imagem.
+ * Como decidimos (cliente pode induzir ao erro, então a regra é conservadora):
+ *  1. PDF → primeira página vira PNG (pdftoppm). Imagem → usada direto.
+ *  2. OCR da NVIDIA (nemotron-ocr-v2) extrai o texto.
+ *  3. Evidências de BOLETO: linha digitável / código de barras de 44 dígitos
+ *     (forte) ou termos como "pagamento de títulos" (médio).
+ *     Evidências de PIX: ID de transação E2E (forte) ou a palavra "pix" (fraco,
+ *     pois boletos costumam citar PIX no rodapé).
+ *  4. Sinais de boleto E de PIX fortes ao mesmo tempo → INDEFINIDO (conflito).
+ *  5. Se a análise por texto não for "alta" confiança, um modelo de visão da
+ *     NVIDIA classifica a imagem; se ele discordar do texto → INDEFINIDO.
  *
- * Sem chave de API, ou se tudo falhar, retorna INDEFINIDO e o comprovante
- * segue para o atendente humano.
+ * INDEFINIDO vai para um atendente humano com os sinais encontrados.
  */
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -30,6 +33,13 @@ const NVIDIA_CV_ENDPOINT = 'https://ai.api.nvidia.com/v1/cv';
 const NVIDIA_CHAT_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 export type ReceiptKind = 'PIX' | 'BOLETO' | 'INDEFINIDO';
+
+export interface ReceiptAnalysis {
+  kind: ReceiptKind;
+  confidence: 'alta' | 'media' | 'baixa';
+  /** Sinais encontrados, em português, para o atendente conferir. */
+  evidence: string[];
+}
 
 export interface DownloadedMedia {
   base64: string;
@@ -71,19 +81,68 @@ export async function downloadMediaBounded(msg: DownloadableMessage): Promise<Do
   }
 }
 
-const BOLETO_PATTERN =
-  /\b(boleto|c[oó]digo de barras|linha digit[aá]vel|ficha de compensa[cç][aã]o|pagamento de t[ií]tulos?)\b/i;
-const PIX_PATTERN = /\bpix\b/i;
+// ─── Evidências ──────────────────────────────────────────────────────────────
+
+/** Linha digitável do boleto (47 dígitos, com ou sem pontos e espaços). */
+const LINHA_DIGITAVEL = /\b\d{5}\.?\d{5}\s?\d{5}\.?\d{6}\s?\d{5}\.?\d{6}\s?\d\s?\d{14}\b/;
+/** ID de ponta a ponta do PIX: E + ISPB (8) + data/hora (12) + sufixo alfanumérico (11). */
+const E2E_ID = /\bE\d{8}\d{12}[A-Za-z0-9]{11}\b/;
+const BOLETO_TERMS = /\b(boleto|c[oó]digo de barras|linha digit[aá]vel|ficha de compensa[cç][aã]o|pagamento de t[ií]tulos?)\b/i;
+const PIX_WORD = /\bpix\b/i;
 
 /**
- * Regra fixa sobre o texto do comprovante. Boleto vem antes: comprovantes de
- * boleto costumam citar "pix" no rodapé (aviso genérico do banco).
+ * Regra sobre o texto do comprovante. Usa evidências fortes primeiro e marca
+ * conflito quando boleto e PIX aparecem fortes ao mesmo tempo.
  */
-export function classifyReceiptText(text: string): ReceiptKind {
-  if (BOLETO_PATTERN.test(text)) return 'BOLETO';
-  if (PIX_PATTERN.test(text)) return 'PIX';
-  return 'INDEFINIDO';
+export function analyzeReceiptText(text: string): ReceiptAnalysis {
+  const boletoStrong: string[] = [];
+  const boletoWeak: string[] = [];
+  // O OCR costuma separar o código com pontos e espaços: a checagem usa a
+  // versão sem separadores entre dígitos.
+  const digitsJoined = text.replace(/(?<=\d)[.\s](?=\d)/g, '');
+  // OCR de foto de celular perde ou troca 1 dígito: aceita de 44 a 48 dígitos.
+  if (LINHA_DIGITAVEL.test(text) || /\d{47}/.test(digitsJoined)) boletoStrong.push('linha digitável');
+  else if (/\d{44,48}/.test(digitsJoined)) boletoStrong.push('código de barras (dígitos lidos pelo OCR)');
+  const term = text.match(BOLETO_TERMS)?.[0];
+  if (term) boletoWeak.push(`termo "${term}"`);
+
+  const pixStrong: string[] = [];
+  const pixWeak: string[] = [];
+  if (E2E_ID.test(text)) pixStrong.push('ID de transação PIX (E2E)');
+  if (PIX_WORD.test(text)) pixWeak.push('menção a PIX');
+
+  const boletoAll = [...boletoStrong, ...boletoWeak];
+  const pixAll = [...pixStrong, ...pixWeak];
+
+  // Qualquer termo de boleto junto com um ID de PIX é contraditório: vai para humano.
+  if (boletoAll.length > 0 && pixStrong.length > 0) {
+    return {
+      kind: 'INDEFINIDO',
+      confidence: 'baixa',
+      evidence: [...boletoAll, ...pixAll, 'sinais de boleto e de PIX ao mesmo tempo'],
+    };
+  }
+  if (boletoStrong.length > 0) {
+    return { kind: 'BOLETO', confidence: 'alta', evidence: boletoAll };
+  }
+  if (pixStrong.length > 0) {
+    return { kind: 'PIX', confidence: 'alta', evidence: pixAll };
+  }
+  if (boletoWeak.length > 0) {
+    return { kind: 'BOLETO', confidence: 'media', evidence: boletoAll };
+  }
+  if (pixWeak.length > 0) {
+    return { kind: 'PIX', confidence: 'media', evidence: pixAll };
+  }
+  return { kind: 'INDEFINIDO', confidence: 'baixa', evidence: [] };
 }
+
+/** Compatibilidade: só o tipo, sem evidências. */
+export function classifyReceiptText(text: string): ReceiptKind {
+  return analyzeReceiptText(text).kind;
+}
+
+// ─── Chamadas à NVIDIA ───────────────────────────────────────────────────────
 
 /** Lê o texto da imagem com o OCR da NVIDIA. Retorna null se a chamada falhar. */
 async function ocrImage(imageBase64: string, mimetype: string): Promise<string | null> {
@@ -109,10 +168,10 @@ async function ocrImage(imageBase64: string, mimetype: string): Promise<string |
   }
 }
 
-/** Classifica a imagem com o modelo de visão da NVIDIA (reserva do OCR). */
-async function visionClassify(imageBase64: string, mimetype: string): Promise<ReceiptKind> {
+/** Classifica a imagem com o modelo de visão da NVIDIA (confirmação independente). */
+async function visionClassify(imageBase64: string, mimetype: string): Promise<ReceiptKind | null> {
   const apiKey = config.aiApiKey;
-  if (!apiKey) return 'INDEFINIDO';
+  if (!apiKey) return null;
   try {
     const response = await axios.post<ChatResponse>(
       NVIDIA_CHAT_ENDPOINT,
@@ -138,19 +197,20 @@ async function visionClassify(imageBase64: string, mimetype: string): Promise<Re
       },
       {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        timeout: 25_000,
+        timeout: 40_000,
       }
     );
     const answer = (response.data?.choices?.[0]?.message?.content ?? '').toUpperCase();
     if (/\bBOLETO\b/.test(answer)) return 'BOLETO';
     if (/\bPIX\b/.test(answer)) return 'PIX';
-    return 'INDEFINIDO';
+    if (/\bINDEFINIDO\b/.test(answer)) return 'INDEFINIDO';
+    return null;
   } catch (err) {
     logger.warn(
       { error: err instanceof Error ? err.message : String(err) },
-      '[ReceiptAnalysis] Modelo de visão falhou — seguindo como INDEFINIDO'
+      '[ReceiptAnalysis] Modelo de visão falhou — análise segue só pelo texto'
     );
-    return 'INDEFINIDO';
+    return null;
   }
 }
 
@@ -177,12 +237,42 @@ async function pdfFirstPageToPng(pdfBase64: string): Promise<string | null> {
   }
 }
 
+// ─── Decisão final ───────────────────────────────────────────────────────────
+
 /**
- * Classifica o comprovante como PIX, BOLETO ou INDEFINIDO. PDFs são analisados
- * pela primeira página. Sem chave de API, ou sem resposta confiável, o
- * resultado é INDEFINIDO e o atendente humano decide.
+ * Combina o texto (OCR) com a visão. Sem visão disponível, mantém a análise
+ * por texto e registra isso nas evidências.
  */
-export async function classifyReceipt(media: DownloadedMedia): Promise<ReceiptKind> {
+export function combineAnalyses(text: ReceiptAnalysis, visual: ReceiptKind | null): ReceiptAnalysis {
+  if (visual === null) {
+    return { ...text, evidence: [...text.evidence, 'confirmação visual indisponível'] };
+  }
+  if (text.kind === 'INDEFINIDO') {
+    return {
+      kind: visual,
+      confidence: visual === 'INDEFINIDO' ? 'baixa' : 'media',
+      evidence: [...text.evidence, `classificação visual: ${visual}`],
+    };
+  }
+  if (visual === 'INDEFINIDO' || visual === text.kind) {
+    return {
+      ...text,
+      confidence: visual === text.kind && text.confidence !== 'baixa' ? 'alta' : text.confidence,
+      evidence: [...text.evidence, visual === text.kind ? 'confirmado pela visão' : 'visão não identificou o tipo'],
+    };
+  }
+  return {
+    kind: 'INDEFINIDO',
+    confidence: 'baixa',
+    evidence: [...text.evidence, `texto indica ${text.kind}, visão indica ${visual}`],
+  };
+}
+
+/**
+ * Analisa o comprovante completo. PDFs usam a primeira página. A visão sempre
+ * confirma (ou contradiz) a leitura do texto.
+ */
+export async function analyzeReceipt(media: DownloadedMedia): Promise<ReceiptAnalysis> {
   let imageBase64: string | null = null;
   let imageMime = media.mimetype;
 
@@ -192,11 +282,19 @@ export async function classifyReceipt(media: DownloadedMedia): Promise<ReceiptKi
   } else if (media.mimetype.startsWith('image/')) {
     imageBase64 = media.base64;
   }
-  if (!imageBase64) return 'INDEFINIDO';
+  if (!imageBase64) {
+    return { kind: 'INDEFINIDO', confidence: 'baixa', evidence: ['arquivo não é imagem nem PDF legível'] };
+  }
 
-  const text = await ocrImage(imageBase64, imageMime);
-  const fromText = text ? classifyReceiptText(text) : 'INDEFINIDO';
-  if (fromText !== 'INDEFINIDO') return fromText;
+  // OCR e visão rodam em paralelo: o tempo total é o maior dos dois, não a soma.
+  const [text, visual] = await Promise.all([
+    ocrImage(imageBase64, imageMime),
+    visionClassify(imageBase64, imageMime),
+  ]);
+  return combineAnalyses(analyzeReceiptText(text ?? ''), visual);
+}
 
-  return visionClassify(imageBase64, imageMime);
+/** Compatibilidade: devolve só o tipo. */
+export async function classifyReceipt(media: DownloadedMedia): Promise<ReceiptKind> {
+  return (await analyzeReceipt(media)).kind;
 }

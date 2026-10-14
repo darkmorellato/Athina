@@ -27,7 +27,7 @@ import { PaymobiScraperService } from './PaymobiScraperService.js';
 import config from '../config/index.js';
 import { getDb, getMeta, setMeta } from './db.js';
 import { sanitizeForWhatsApp } from '../utils/sanitizeForWhatsApp.js';
-import { downloadMediaBounded, classifyReceipt, type DownloadedMedia } from './helpers/receiptAnalysisHelper.js';
+import { downloadMediaBounded, analyzeReceipt, type DownloadedMedia, type ReceiptAnalysis, type ReceiptKind } from './helpers/receiptAnalysisHelper.js';
 import { notifyHumanAgents } from './helpers/humanHandoffHelper.js';
 import type { PaymobiResult } from '../types/index.js';
 import * as msg from './athinaMessages.js';
@@ -48,7 +48,7 @@ interface FlowIncomingMessage {
 export interface AthinaFlowDeps {
   sendMessage: (to: string, text: string) => Promise<void>;
   consultarPaymobi: (query: string, clientName?: string) => Promise<PaymobiResult>;
-  analyzeReceipt: (media: DownloadedMedia) => Promise<'PIX' | 'BOLETO' | 'INDEFINIDO'>;
+  analyzeReceipt: (media: DownloadedMedia) => Promise<ReceiptAnalysis>;
   notifyHumans: (payload: {
     client: { nome: string; cpf: string; imei: string };
     reason: string;
@@ -70,6 +70,24 @@ function humanDelayMs(): number {
   return options[Math.floor(Math.random() * options.length)];
 }
 
+const METHOD_LABEL: Record<ReceiptKind, string> = { PIX: 'PIX', BOLETO: 'boleto', INDEFINIDO: 'não identificado' };
+
+/** Resumo para o atendente: resultado, confiança, sinais e divergência com o cliente. */
+export function describeReceiptForOperator(analysis: ReceiptAnalysis, declared: 'pix' | 'boleto' | undefined): string {
+  const lines = [
+    `Análise do comprovante: ${METHOD_LABEL[analysis.kind]} (confiança ${analysis.confidence}).`,
+    `Sinais: ${analysis.evidence.length > 0 ? analysis.evidence.join('; ') : 'nenhum'}.`,
+    `Cliente informou: ${declared === 'pix' ? 'PIX' : declared === 'boleto' ? 'boleto' : 'não informou'}.`,
+  ];
+  const declaredKind: ReceiptKind | null = declared === 'pix' ? 'PIX' : declared === 'boleto' ? 'BOLETO' : null;
+  if (analysis.kind === 'INDEFINIDO') {
+    lines.push('⚠️ Não foi possível confirmar o tipo. Conferir o comprovante antes de liberar.');
+  } else if (declaredKind && declaredKind !== analysis.kind) {
+    lines.push(`⚠️ DIVERGÊNCIA: o cliente disse ${METHOD_LABEL[declaredKind]}, mas o comprovante indica ${METHOD_LABEL[analysis.kind]}. Conferir antes de liberar.`);
+  }
+  return lines.join('\n');
+}
+
 export class AthinaFlowService {
   private deps: AthinaFlowDeps;
   private pending: Map<string, Promise<void>> = new Map();
@@ -85,7 +103,7 @@ export class AthinaFlowService {
     this.deps = {
       sendMessage: deps?.sendMessage ?? this.defaultSendMessage,
       consultarPaymobi: deps?.consultarPaymobi ?? this.defaultConsultarPaymobi,
-      analyzeReceipt: deps?.analyzeReceipt ?? classifyReceipt,
+      analyzeReceipt: deps?.analyzeReceipt ?? analyzeReceipt,
       notifyHumans: deps?.notifyHumans ?? this.defaultNotifyHumans,
       isReady:
         deps?.isReady ??
@@ -532,7 +550,8 @@ export class AthinaFlowService {
     }
 
     await analyticsService.increment('ocrScans');
-    const kind = await this.deps.analyzeReceipt(media);
+    const analysis = await this.deps.analyzeReceipt(media);
+    const kind = analysis.kind;
     if (kind === 'INDEFINIDO') {
       await analyticsService.increment('ocrSuspicious');
     } else {
@@ -544,7 +563,7 @@ export class AthinaFlowService {
       contactId,
       client: this.clientForHandoff(flow),
       reason: 'Comprovante de pagamento recebido (celular bloqueado)',
-      details: `Comprovante analisado como: ${kind}. Método informado pelo cliente: ${flow.bloqueioMetodo ?? 'não informado'}.`,
+      details: describeReceiptForOperator(analysis, flow.bloqueioMetodo),
       attachment: media,
     });
     await chatStateService.resetFlowState(contactId);
