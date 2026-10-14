@@ -27,6 +27,11 @@ export function buildAskNameText(): string {
   return flowText('askName');
 }
 
+/** Documento com tamanho correto, mas dígito verificador inválido (Mod-11/Luhn). */
+export function buildInvalidDocText(): string {
+  return 'Este número não confere com um CPF/CNPJ ou IMEI válido. 🤔\n\nConfira os dígitos e envie novamente, por favor.';
+}
+
 export function buildLookupWaitText(): string {
   return flowText('lookupWait');
 }

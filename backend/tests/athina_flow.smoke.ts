@@ -51,10 +51,10 @@ function client(overrides?: Partial<PaymobiResult['data'] extends infer D ? (D e
     dataVenda: '2024-01-01',
     expirationDate: '2025-01-01',
     duration: '12 meses',
-    cpf: '12345678901',
+    cpf: '52998224725',
     contrato: 'C1',
     nome: 'Maria Silva',
-    imei: '123456789012345',
+    imei: '529982247252345',
     statusVenda: 'active',
     ...overrides,
   };
@@ -104,6 +104,7 @@ function makeFlow(overrides?: {
   receiptKind?: 'PIX' | 'BOLETO' | 'INDEFINIDO';
   ready?: boolean;
   now?: Date;
+  debounceMs?: () => number;
 }) {
   const sent: SentMessage[] = [];
   const notified: Notification[] = [];
@@ -125,6 +126,7 @@ function makeFlow(overrides?: {
     },
     isReady: () => overrides?.ready ?? true,
     replyDelayMs: () => 0,
+    debounceMs: () => overrides?.debounceMs?.() ?? 0,
     now: () => overrides?.now ?? new Date('2026-10-12T13:00:00Z'),
   });
 
@@ -141,7 +143,7 @@ function newContact(): string {
 /** Fluxo até a confirmação de regularização (2+ parcelas em atraso). */
 async function reachMultiConfirm(flow: ReturnType<typeof makeFlow>['flow'], contact: string): Promise<void> {
   await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: `${contact}-a` });
-  await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: `${contact}-b` });
+  await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: `${contact}-b` });
   await flow.handleIncomingMessage({ from: contact, body: '1', id: `${contact}-c` });
 }
 
@@ -168,7 +170,7 @@ const scenarios: Scenario[] = [
       };
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'w1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'w2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'w2' });
       await flow.handleIncomingMessage({ from: contact, body: '3', id: 'w3' }); // celular bloqueado
       await flow.handleIncomingMessage({ from: contact, body: '2', id: 'w4' }); // já paguei
       await flow.handleIncomingMessage({ from: contact, body: '2', id: 'w5' }); // código de barras
@@ -296,7 +298,7 @@ const scenarios: Scenario[] = [
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'a1' });
       assert.ok(sent.some((m) => /CPF.*IMEI/i.test(m.text)), 'deveria pedir o CPF/IMEI após o nome');
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'a2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'a2' });
       assert.ok(sent.some((m) => /não encontramos/i.test(m.text)), 'deveria avisar que não localizou o cadastro');
       assert.equal(consulted.length, 1);
 
@@ -313,9 +315,9 @@ const scenarios: Scenario[] = [
       const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'b1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'b2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'b2' });
       assert.equal(consulted.length, 1);
-      assert.equal(consulted[0].query, '12345678901');
+      assert.equal(consulted[0].query, '52998224725');
       assert.equal(consulted[0].clientName, 'Maria Silva');
       assert.ok(sent.some((m) => /Como podemos lhe ajudar/i.test(m.text)), 'deveria mostrar o menu 1-4');
     },
@@ -326,7 +328,7 @@ const scenarios: Scenario[] = [
       const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundUmAtraso() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'c1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'c2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'c2' });
       await flow.handleIncomingMessage({ from: contact, body: '1', id: 'c3' }); // Pagar Boleto
       assert.ok(sent.some((m) => /boleto em atraso/i.test(m.text)), 'deveria mostrar 1 boleto em atraso');
       assert.ok(sent.some((m) => /corretos/i.test(m.text)), 'deveria perguntar se os dados estão corretos');
@@ -342,7 +344,7 @@ const scenarios: Scenario[] = [
       const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'd1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'd2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'd2' });
       await flow.handleIncomingMessage({ from: contact, body: '1', id: 'd3' });
       assert.ok(sent.some((m) => /Parabéns/i.test(m.text)));
       assert.ok(sent.some((m) => /Como podemos lhe ajudar/i.test(m.text)));
@@ -354,7 +356,7 @@ const scenarios: Scenario[] = [
       const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundMultiAtraso() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'e1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'e2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'e2' });
       await flow.handleIncomingMessage({ from: contact, body: '1', id: 'e3' });
       assert.ok(sent.some((m) => /3 boletos em atraso/i.test(m.text)));
       await flow.handleIncomingMessage({ from: contact, body: '1', id: 'e4' }); // quer regularizar
@@ -369,7 +371,7 @@ const scenarios: Scenario[] = [
       const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'f1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'f2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'f2' });
       await flow.handleIncomingMessage({ from: contact, body: '2', id: 'f3' });
       assert.ok(sent.some((m) => /Saldo atual/i.test(m.text) && m.text.includes('Em atraso')));
       await flow.handleIncomingMessage({ from: contact, body: '1', id: 'f4' });
@@ -382,7 +384,7 @@ const scenarios: Scenario[] = [
       const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundUmAtraso(), receiptKind: 'PIX' });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'g1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'g2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'g2' });
       await flow.handleIncomingMessage({ from: contact, body: '3', id: 'g3' }); // Celular Bloqueado
       assert.ok(sent.some((m) => /bloqueio do celular/i.test(m.text)));
       await flow.handleIncomingMessage({ from: contact, body: '2', id: 'g4' }); // já paguei
@@ -412,7 +414,7 @@ const scenarios: Scenario[] = [
       const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'h1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'h2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'h2' });
       await flow.handleIncomingMessage({ from: contact, body: '4', id: 'h3' });
       assert.ok(sent.some((m) => /sobre o que/i.test(m.text)));
       await flow.handleIncomingMessage({ from: contact, body: 'Quero trocar o dia de vencimento', id: 'h4' });
@@ -501,7 +503,7 @@ const scenarios: Scenario[] = [
 
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'p1-1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'p1-2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'p1-2' });
       assert.equal(consulted.length, 1, 'lookup inicial faz 1 consulta na API');
       assert.equal(pixResolvedLinks.length, 0, 'lookup inicial NÃO deve abrir Playwright para extrair PIX');
 
@@ -528,7 +530,7 @@ const scenarios: Scenario[] = [
       const contact = newContact();
       await flow.handleIncomingMessage({
         from: contact,
-        body: 'Oi, meu nome é Maria Silva, meu CPF é 12345678901 e quero pagar meu boleto',
+        body: 'Oi, meu nome é Maria Silva, meu CPF é 52998224725 e quero pagar meu boleto',
         id: 'nlu-1',
       });
       assert.equal(consulted.length, 1);
@@ -552,7 +554,7 @@ const scenarios: Scenario[] = [
       const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundUmAtraso() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'nlu-3' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'nlu-4' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'nlu-4' });
       // No MAIN_MENU, em vez de "3" → "2" → "1", o cliente diz direto que o celular bloqueou mas já pagou via PIX
       await flow.handleIncomingMessage({
         from: contact,
@@ -571,7 +573,7 @@ const scenarios: Scenario[] = [
       const { flow, notified } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
       const contact = newContact();
       await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'fb-1' });
-      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'fb-2' });
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'fb-2' });
 
       // 3 respostas incompreensíveis no MAIN_MENU
       await flow.handleIncomingMessage({ from: contact, body: 'xyz123', id: 'fb-3' });
@@ -586,13 +588,15 @@ const scenarios: Scenario[] = [
   {
     name: 'motor conversacional P2: debounce agrupa mensagens picadas enviadas em sequência rápida',
     run: async () => {
-      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
-      (flow as unknown as { deps: { debounceMs: () => number } }).deps.debounceMs = () => 40;
+      const { flow, sent, consulted } = makeFlow({
+        consultarPaymobi: async () => foundEmDia(),
+        debounceMs: () => 40,
+      });
       const contact = newContact();
 
       // Cliente manda nome e CPF em duas mensagens separadas por 5ms
       const p1 = flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'db-1' });
-      const p2 = flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'db-2' });
+      const p2 = flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'db-2' });
       await Promise.all([p1, p2]);
 
       assert.equal(consulted.length, 1, 'as duas mensagens agrupadas já completam nome + CPF e consultam o Paymobi de uma vez');
@@ -610,7 +614,7 @@ const scenarios: Scenario[] = [
         deps: { transcribeAudio: (m: { mimetype: string }) => Promise<string | null> };
       }).deps.transcribeAudio = async (m) => {
         if (m.mimetype.startsWith('audio/')) {
-          return 'Oi meu nome é Maria Silva e meu CPF é 12345678901';
+          return 'Oi meu nome é Maria Silva e meu CPF é 52998224725';
         }
         return null;
       };
@@ -655,6 +659,65 @@ const scenarios: Scenario[] = [
       assert.equal(sentWebhook.length, 1);
       assert.equal(sentWebhook[0].to, '5511988887777@c.us');
       assert.match(sentWebhook[0].text, /pagamento.*confirmado|recebemos/i);
+    },
+  },
+  {
+    name: 'P0: CPF com dígito verificador errado (typo) não consulta o Paymobi e pede conferência',
+    run: async () => {
+      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'cd-1' });
+      // 52998224720: mesmo CPF do fixture, com o último dígito trocado → Mod-11 falha
+      await flow.handleIncomingMessage({ from: contact, body: '52998224720', id: 'cd-2' });
+      assert.equal(consulted.length, 0, 'CPF com checksum inválido não deve consultar o Paymobi');
+      assert.ok(sent.some((m) => /incorreto|confira/i.test(m.text)), 'deve pedir para conferir o documento');
+
+      await flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'cd-3' });
+      assert.equal(consulted.length, 1, 'CPF válido deve consultar normalmente depois');
+      assert.equal(consulted[0].clientName, 'Maria Silva', 'o nome informado antes deve ser preservado');
+    },
+  },
+  {
+    name: 'P2: o debounce padrão de produção fica na faixa humana de 1.5–2.5s (plano)',
+    run: async () => {
+      const flow = new AthinaFlowService({
+        sendMessage: async () => {},
+        consultarPaymobi: async () => NOT_FOUND,
+        resolvePix: async () => ({ pixCode: '', pixUrl: '', qrCodePath: '' }),
+        analyzeReceipt: async () => ({ kind: 'INDEFINIDO', confidence: 'baixa', evidence: [] }),
+        transcribeAudio: async () => null,
+        notifyHumans: async () => {},
+        isReady: () => true,
+        replyDelayMs: () => 0,
+        now: () => new Date('2026-10-12T13:00:00Z'),
+      });
+      const d = (flow as unknown as { deps: { debounceMs: () => number } }).deps.debounceMs();
+      assert.ok(d >= 1500 && d <= 2500, `debounce padrão deve ficar entre 1500 e 2500 ms (veio ${d})`);
+    },
+  },
+  {
+    name: 'P2: mídia que chega logo após texto em buffer espera o texto ser processado antes (ordem preservada)',
+    run: async () => {
+      const { flow, sent } = makeFlow({
+        consultarPaymobi: async () => foundEmDia(),
+        debounceMs: () => 40,
+      });
+      const contact = newContact();
+      const textMsg = flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'ord-1' });
+      const mediaMsg = flow.handleIncomingMessage({
+        from: contact,
+        body: '',
+        hasMedia: true,
+        id: 'ord-2',
+        downloadMedia: async () => ({ data: 'ZmFrZQ==', mimetype: 'image/png' }),
+      });
+      await Promise.all([textMsg, mediaMsg]);
+
+      const idxAskDoc = sent.findIndex((m) => /CPF/i.test(m.text));
+      const idxMedia = sent.findIndex((m) => /Recebi sua mídia/i.test(m.text));
+      assert.ok(idxAskDoc !== -1, 'o texto do buffer deve ser processado');
+      assert.ok(idxMedia !== -1, 'a mídia deve receber a orientação');
+      assert.ok(idxAskDoc < idxMedia, 'o texto em buffer deve vir ANTES da mídia seguinte');
     },
   },
   {

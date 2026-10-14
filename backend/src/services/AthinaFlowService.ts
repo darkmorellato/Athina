@@ -131,7 +131,9 @@ export class AthinaFlowService {
         deps?.isReady ??
         (() => whatsAppService.getClientState() === 'READY' && Boolean(whatsAppService.getClient())),
       replyDelayMs: deps?.replyDelayMs ?? humanDelayMs,
-      debounceMs: deps?.debounceMs ?? (() => 0),
+      // Janela de agrupamento de mensagens picadas: 1.8s de silêncio junta
+      // "oi" / "meu nome é…" / "quero pagar" num único turno lógico.
+      debounceMs: deps?.debounceMs ?? (() => 1800),
       now: deps?.now ?? (() => new Date()),
     };
   }
@@ -251,6 +253,9 @@ export class AthinaFlowService {
       return promise;
     }
 
+    // Mídia (ou mensagem sem texto) não entra no debounce, mas precisa preservar
+    // a ordem: drena o texto ainda em buffer do MESMO contato antes de processar.
+    if (this.debounceBuffers.has(from)) this.flushDebounce(from);
     return this.enqueueMessage(from, text, raw);
   }
 
@@ -258,6 +263,7 @@ export class AthinaFlowService {
     const entry = this.debounceBuffers.get(from);
     if (!entry) return;
     this.debounceBuffers.delete(from);
+    clearTimeout(entry.timer);
     const combinedText = entry.texts.join('\n');
     const mergedRaw: FlowIncomingMessage = { ...entry.lastRaw, body: combinedText };
     void this.enqueueMessage(from, combinedText, mergedRaw).finally(() => entry.resolve());
@@ -380,8 +386,12 @@ export class AthinaFlowService {
   ): Promise<void> {
     const collect = state.collect;
     const extractedDoc = nlu.extractedDoc ?? extractPlausibleDocument(text);
-    const hasDoc = extractedDoc !== null;
-    const cleanDigits = extractedDoc?.digits ?? '';
+    // Gate de checksum (Mod-11 CPF/CNPJ, Luhn IMEI): tamanho certo com dígito
+    // verificador errado NÃO consulta o Paymobi — pede conferência imediata.
+    const docRejected = extractedDoc !== null && !extractedDoc.checksumValid;
+    const validDoc = extractedDoc && extractedDoc.checksumValid ? extractedDoc : null;
+    const hasDoc = validDoc !== null;
+    const cleanDigits = validDoc?.digits ?? '';
     const extractedName = nlu.extractedName ?? extractNameFromText(text);
     const hasName = extractedName !== null;
     const nameCandidate = extractedName ?? '';
@@ -407,6 +417,20 @@ export class AthinaFlowService {
           ? 'Sem problemas! Você encontra o IMEI discando *#06#* no próprio celular. Me envie o seu *IMEI* (15 dígitos), por favor. 📲'
           : msg.buildWelcomeText()
       );
+      return;
+    }
+
+    // Documento com dígito verificador errado (typo do cliente): corrige na hora,
+    // sem consultar o Paymobi — preserva o nome já informado.
+    if (docRejected) {
+      if (hasName) {
+        await chatStateService.setState(contactId, {
+          stage: 'COLLECTING',
+          collect: { ...collect, name: nameCandidate.slice(0, 120) },
+          flow: flowMeta,
+        });
+      }
+      await this.reply(contactId, msg.buildInvalidDocText());
       return;
     }
 
