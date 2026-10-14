@@ -10,11 +10,13 @@ import aiService from '../services/AIService.js';
 import chatStateService from '../services/ChatStateService.js';
 import analyticsService from '../services/AnalyticsService.js';
 import trainingService from '../services/TrainingService.js';
+import { aiRateLimiter, ttsRateLimiter, paymobiRateLimiter, avatarRateLimiter } from './socket/rateLimiter.js';
+import { safeEmit, type AthinaSocket } from './socket/safeEmit.js';
+import { registerTrainingHandlers } from './socket/trainingHandlers.js';
 import { PaymobiScraperService } from '../services/PaymobiScraperService.js';
 import { generateTTS } from '../services/TTSService.js';
 import { sanitizeForWhatsApp } from '../utils/sanitizeForWhatsApp.js';
 import athinaFlowService from '../services/AthinaFlowService.js';
-import { listFlowTexts, saveFlowText } from '../services/athinaTexts.js';
 import { handleRequestChatHistory } from '../services/helpers/whatsappChatHelper.js';
 import { resolveAvatars } from '../services/helpers/whatsappAvatarHelper.js';
 import config from '../config/index.js';
@@ -28,7 +30,6 @@ import {
   sendFileReplySchema,
   sendReplySchema,
   forwardMessageSchema,
-  flowTextUpdateSchema,
   type ForwardMessagePayload,
   spellingSchema,
   ttsRequestSchema,
@@ -47,86 +48,10 @@ import type {
   TtsRequestPayload,
   VoiceReplyPayload,
 } from '@shared/contracts.js';
-import type { Server, Socket } from 'socket.io';
+import type { Server } from 'socket.io';
 
 // Socket.IO tipado com os contratos compartilhados (shared/contracts.ts)
 type AthinaServer = Server<ClientToServerEvents, ServerToClientEvents>;
-type AthinaSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
-
-// ─── Rate Limiter ────────────────────────────────────────────────────────────
-class RateLimiter {
-  private readonly windowMs: number;
-  private readonly maxRequests: number;
-  private readonly clients = new Map<string, number[]>();
-
-  constructor(windowMs: number, maxRequests: number) {
-    this.windowMs = windowMs;
-    this.maxRequests = maxRequests;
-  }
-
-  isAllowed(socketId: string): boolean {
-    const now = Date.now();
-    const timestamps = this.clients.get(socketId) ?? [];
-    const recent = timestamps.filter((t) => now - t < this.windowMs);
-
-    if (recent.length >= this.maxRequests) {
-      return false;
-    }
-
-    recent.push(now);
-    this.clients.set(socketId, recent);
-    return true;
-  }
-
-  cleanup(socketId: string): void {
-    this.clients.delete(socketId);
-  }
-
-  /** Security fix: Remove stale entries to prevent unbounded memory growth */
-  cleanupStale(): void {
-    const now = Date.now();
-    for (const [socketId, timestamps] of this.clients.entries()) {
-      const recent = timestamps.filter((t) => now - t < this.windowMs);
-      if (recent.length === 0) {
-        this.clients.delete(socketId);
-      } else {
-        this.clients.set(socketId, recent);
-      }
-    }
-  }
-
-  get size(): number {
-    return this.clients.size;
-  }
-}
-
-const aiRateLimiter = new RateLimiter(60_000, 30);
-const ttsRateLimiter = new RateLimiter(60_000, 10);
-const paymobiRateLimiter = new RateLimiter(60_000, 10);
-const avatarRateLimiter = new RateLimiter(60_000, 30);
-
-// Security fix: Periodic cleanup of stale rate limiter entries (every 5 minutes)
-const rateLimiterCleanupInterval = setInterval(() => {
-  aiRateLimiter.cleanupStale();
-  ttsRateLimiter.cleanupStale();
-  paymobiRateLimiter.cleanupStale();
-  logger.debug(
-    { ai: aiRateLimiter.size, tts: ttsRateLimiter.size, paymobi: paymobiRateLimiter.size },
-    'Rate limiters cleaned up'
-  );
-}, 300_000);
-rateLimiterCleanupInterval.unref();
-
-// ─── Safe Emit Helper ────────────────────────────────────────────────────────
-/** Safely emit a socket event with error handling. */
-function safeEmit(socket: AthinaSocket, event: keyof ServerToClientEvents, data?: unknown): void {
-  try {
-    // cast: emit dinâmico por chave não é expressável no mapa tipado
-    (socket.emit as (event: string, data?: unknown) => void)(event, data);
-  } catch (err) {
-    logger.error({ event, socketId: socket.id, error: err instanceof Error ? err.message : String(err) }, 'Socket emit failed');
-  }
-}
 
 // ─── SocketController ────────────────────────────────────────────────────────
 class SocketController {
@@ -151,53 +76,7 @@ class SocketController {
       this.io.emit('agent-mode', { serverAutoReply: enabled });
     });
 
-    // ─── Training data (persisted in backend/learning_database.json) ───────
-    socket.on('update-training-rules', (rules: unknown) => {
-      try {
-        const updated = trainingService.setRules(rules);
-        this.io.emit('training-data-updated', updated);
-        logger.info({ count: updated.customRules.length, socketId: socket.id }, 'Training rules updated');
-      } catch (err) {
-        logger.warn({ error: err instanceof Error ? err.message : String(err), socketId: socket.id }, 'Invalid training rules rejected');
-      }
-    });
-
-    socket.on('update-training-qas', (qas: unknown) => {
-      try {
-        const updated = trainingService.setQas(qas);
-        this.io.emit('training-data-updated', updated);
-        logger.info({ count: updated.qaExamples.length, socketId: socket.id }, 'Training QAs updated');
-      } catch (err) {
-        logger.warn({ error: err instanceof Error ? err.message : String(err), socketId: socket.id }, 'Invalid training QAs rejected');
-      }
-    });
-
-    socket.on('request-training', () => {
-      safeEmit(socket, 'training-data', trainingService.getTraining());
-    });
-
-    // ─── Textos editáveis do roteiro da Athina (aba Treinamento) ───────────
-    socket.on('update-flow-text', (data: unknown) => {
-      const parsed = flowTextUpdateSchema.safeParse(data);
-      if (!parsed.success) {
-        logger.warn({ socketId: socket.id }, 'Invalid update-flow-text payload rejected');
-        return;
-      }
-      const saved = saveFlowText(parsed.data.key, parsed.data.text);
-      if (!saved) {
-        logger.warn({ key: parsed.data.key, socketId: socket.id }, 'Unknown flow text key rejected');
-        return;
-      }
-      this.io.emit('flow-texts', listFlowTexts());
-    });
-
-    socket.on('request-flow-texts', () => {
-      safeEmit(socket, 'flow-texts', listFlowTexts());
-    });
-    safeEmit(socket, 'flow-texts', listFlowTexts());
-
-    // Send persisted training data immediately so the panel always starts in sync
-    safeEmit(socket, 'training-data', trainingService.getTraining());
+    registerTrainingHandlers(socket, this.io);
 
     // ─── Status ────────────────────────────────────────────────────────────
     socket.on('request-status', () => this.handleRequestStatus(socket));
