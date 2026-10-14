@@ -139,7 +139,39 @@ async function reachMultiConfirm(flow: ReturnType<typeof makeFlow>['flow'], cont
   await flow.handleIncomingMessage({ from: contact, body: '1', id: `${contact}-c` });
 }
 
+class FakeWhatsAppMessage {
+  private readonly client = { ok: true };
+  hasMedia = true;
+  body = '';
+  /** Como na lib: o download depende de `this` (cliente interno). */
+  async downloadMedia(): Promise<{ data: string; mimetype: string }> {
+    if (!this.client.ok) throw new Error('sem cliente');
+    return { data: 'ZmFrZQ==', mimetype: 'application/pdf' };
+  }
+}
+
 const scenarios: Scenario[] = [
+  {
+    name: 'comprovante enviado como objeto da lib (método com this) é baixado e analisado',
+    run: async () => {
+      const analyzed: string[] = [];
+      const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundUmAtraso(), receiptKind: 'BOLETO' });
+      (flow as unknown as { deps: { analyzeReceipt: (m: { mimetype: string }) => Promise<string> } }).deps.analyzeReceipt = async (m) => {
+        analyzed.push(m.mimetype);
+        return 'BOLETO';
+      };
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'w1' });
+      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'w2' });
+      await flow.handleIncomingMessage({ from: contact, body: '3', id: 'w3' }); // celular bloqueado
+      await flow.handleIncomingMessage({ from: contact, body: '2', id: 'w4' }); // já paguei
+      await flow.handleIncomingMessage({ from: contact, body: '2', id: 'w5' }); // código de barras
+      const media = Object.assign(new FakeWhatsAppMessage(), { from: contact, id: 'w6' });
+      await flow.handleIncomingMessage(media as never);
+      assert.deepEqual(analyzed, ['application/pdf'], 'o PDF deveria ser baixado e analisado');
+      assert.ok(!sent.some((m) => /Ainda estou aguardando/.test(m.text)), 'não deve pedir o comprovante de novo');
+    },
+  },
   {
     name: 'comprovantes: regra de texto separa boleto (inclusive títulos) de PIX',
     run: async () => {

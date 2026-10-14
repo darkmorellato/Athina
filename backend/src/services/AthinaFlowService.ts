@@ -525,7 +525,7 @@ export class AthinaFlowService {
       return;
     }
 
-    const media = await downloadMediaBounded({ hasMedia: raw.hasMedia, downloadMedia: raw.downloadMedia });
+    const media = await downloadMediaBounded({ hasMedia: raw.hasMedia, downloadMedia: () => raw.downloadMedia!.call(raw) });
     if (!media) {
       await this.reply(contactId, msg.buildReceiptReminderText());
       return;
