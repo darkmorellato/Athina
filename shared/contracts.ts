@@ -126,14 +126,86 @@ export const collectDataSchema = z
   })
   .nullable();
 
+export const chatClientDataSchema = z.object({
+  nome: z.string().max(200),
+  cpf: z.string().max(40),
+  imei: z.string().max(40),
+  loja: z.string().max(200),
+  contrato: z.string().max(100),
+});
+
+export const chatParcelaDataSchema = z.object({
+  numero: z.string().max(20),
+  vencimento: z.string().max(40),
+  valor: z.string().max(60),
+  status: z.string().max(60),
+  boletoUrl: z.string().max(2000).optional().default(''),
+  pixUrl: z.string().max(2000).optional().default(''),
+  pixCode: z.string().max(4000).optional().default(''),
+  qrCodePath: z.string().max(500).optional().default(''),
+  total: z.union([z.number(), z.string()]).transform((v) => Number(v) || 0),
+});
+
+export const chatInstallmentSummarySchema = z.object({
+  numero: z.string().max(20),
+  vencimento: z.string().max(40),
+  valor: z.string().max(60),
+  status: z.string().max(60),
+});
+
+export const chatPendingDataSchema = z
+  .object({
+    client: chatClientDataSchema,
+    statusContrato: z.enum(['em_dia', 'atraso']),
+    parcela: chatParcelaDataSchema.optional(),
+  })
+  .nullable();
+
+export const conversationTurnSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string().max(1000),
+  at: z.number(),
+});
+
+export const deferredIntentSchema = z.enum([
+  'PAGAR_BOLETO',
+  'VERIFICAR_SALDO',
+  'CELULAR_BLOQUEADO',
+  'INFORMAR_JA_PAGUEI',
+  'FALAR_COM_ATENDENTE',
+]);
+export type DeferredIntent = z.infer<typeof deferredIntentSchema>;
+
+export const chatFlowDataSchema = z
+  .object({
+    client: chatClientDataSchema.optional(),
+    statusContrato: z.enum(['em_dia', 'atraso']).optional(),
+    overdueCount: z.number().int().min(0).max(500).optional(),
+    parcela: chatParcelaDataSchema.optional(),
+    installments: z.array(chatInstallmentSummarySchema).max(120).optional(),
+    bloqueioMetodo: z.enum(['pix', 'boleto']).optional(),
+    humanTopic: z.string().max(500).optional(),
+    /** Intenção capturada antes da identificação terminar (Slot Jumping) */
+    deferredIntent: deferredIntentSchema.optional(),
+    /** Contador de fallbacks consecutivos no estágio atual */
+    fallbackCount: z.number().int().min(0).max(20).optional(),
+    /** Histórico curto da conversa para contexto NLU */
+    recentTurns: z.array(conversationTurnSchema).max(10).optional(),
+    /** Timestamp (ms) de quando os dados do Paymobi foram consultados */
+    contractFetchedAt: z.number().optional(),
+    /** Timestamp (ms) até quando o atendente humano assumiu a conversa */
+    humanTakeoverUntil: z.number().optional(),
+  })
+  .nullable();
+
 export const chatStateSchema = z.object({
   stage: chatStageSchema,
-  /** Contrato retornado pelo Paymobi (validado por fora) */
-  pendingData: z.any().optional(),
+  /** Contrato retornado pelo Paymobi */
+  pendingData: chatPendingDataSchema.optional(),
   /** Dados parciais da coleta (nome/CPF-IMEI) por contato */
   collect: collectDataSchema.optional(),
-  /** Campos extras do roteiro determinístico (validados por fora, como pendingData) */
-  flow: z.any().optional(),
+  /** Campos do roteiro e contexto conversacional */
+  flow: chatFlowDataSchema.optional(),
 });
 export type ChatState = z.infer<typeof chatStateSchema>;
 
@@ -286,6 +358,8 @@ export interface ClientToServerEvents {
   'get-chat-state': (payload: ContactIdPayload) => void;
   'update-chat-state': (payload: UpdateChatStatePayload) => void;
   'reset-chat-state': (payload: ContactIdPayload) => void;
+  /** Devolve o contato para o atendimento automático da Athina após intervenção humana */
+  'release-human-takeover': (payload: ContactIdPayload) => void;
   'get-contact-avatars': (payload: AvatarsRequestPayload) => void;
   /** Marca a conversa como LIDA no WhatsApp (ticks azuis no cliente) */
   'mark-chat-read': (payload: ContactIdPayload) => void;
@@ -322,6 +396,7 @@ export interface ServerToClientEvents {
   'paymobi-error': (data: { message: string; contactId?: string }) => void;
   'chat-state-loaded': (data: { contactId: string; state: ChatState | null }) => void;
   'chat-state-reset': (data: { contactId: string }) => void;
+  'human-takeover-released': (data: { contactId: string }) => void;
   'tts-audio-generated': (data: { base64: string }) => void;
   'tts-audio-error': (data: { message: string }) => void;
   'spelling-corrected': (data: { text: string }) => void;

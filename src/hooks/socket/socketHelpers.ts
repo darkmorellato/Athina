@@ -1,5 +1,11 @@
-import { HOSTILE_TERMS, GREETING_PATTERNS } from '../../types/index.js';
+import { HOSTILE_TERMS } from '../../types/index.js';
 import type { AgentLog, AnalyticsStats } from '../../types/index.js';
+import {
+  isGreeting as sharedIsGreeting,
+  hasCpfOrImei as sharedHasCpfOrImei,
+  isFullName as sharedIsFullName,
+  sanitizeForWhatsApp,
+} from '@shared/validators.js';
 
 export const INITIAL_LOGS: AgentLog[] = [
   { id: 'init', type: 'info', text: 'Agente Athina inicializada.', time: new Date().toLocaleTimeString() },
@@ -39,24 +45,15 @@ export function playAlertSound(): void {
 }
 
 export function isGreeting(text: string): boolean {
-  const clean = text.toLowerCase().trim().replace(/[?.,!\-/]/g, '');
-  return GREETING_PATTERNS.some(
-    (g) => clean === g || clean.startsWith(g + ' ') || clean.endsWith(' ' + g)
-  );
+  return sharedIsGreeting(text);
 }
 
 export function hasCpfOrImei(text: string): boolean {
-  const clean = text.replace(/\D/g, '');
-  return /\d{11}/.test(clean) || /\d{15}/.test(clean);
+  return sharedHasCpfOrImei(text);
 }
 
 export function isFullName(text: string): boolean {
-  const clean = text.trim();
-  const words = clean.split(/\s+/);
-  if (words.length < 2) return false;
-  if (clean.includes('?') || clean.length > 50) return false;
-  if (isGreeting(clean)) return false;
-  return /^[A-Za-zÀ-ÖØ-öø-ÿ\s]+$/.test(clean);
+  return sharedIsFullName(text);
 }
 
 export function isHostileMessage(text: string): boolean {
@@ -83,21 +80,7 @@ export function humanDelayMs(): number {
  * gêmeo e a mensagem aparece DUPLICADA no chat.
  */
 export function waOutbound(text: string): string {
-  const noMarkdown = text
-    .replace(/\*\*([^*\n]+)\*\*/g, '*$1*')
-    .replace(/__([^_\n]+)__/g, '*$1*')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/`([^`\n]+)`/g, '$1');
-  return noMarkdown
-    .split('\n')
-    .map((line) => {
-      let out = line.replace(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g, (m) => `***.${m.slice(4, 7)}.${m.slice(8, 11)}-**`);
-      if (/cpf|cnpj|documento|identifica/i.test(line)) {
-        out = out.replace(/\b\d{3}(\d{3})(\d{3})\d{2}\b/g, (m) => `***.${m.slice(3, 6)}.${m.slice(6, 9)}-**`);
-      }
-      return out;
-    })
-    .join('\n');
+  return sanitizeForWhatsApp(text);
 }
 
 /** Unix em SEGUNDOS — timestamp das mensagens criadas localmente no painel

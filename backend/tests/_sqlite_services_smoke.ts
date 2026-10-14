@@ -107,5 +107,17 @@ await scenario('migração: banco novo importa o learning_database.json legado',
   );
 });
 
-console.log(`\nSQLite services smoke: ${passed}/5 cenários passaram`);
+await scenario('treinamento FTS5: busca contextual BM25 retorna os exemplos mais relevantes para a pergunta', () => {
+  const svc = new TrainingService(openDatabase(':memory:'));
+  svc.setQas([
+    { intent: 'Domingo', question: 'Vocês abrem aos domingos?', answer: 'Não atendemos aos domingos, apenas de segunda a sábado.' },
+    { intent: 'Desbloqueio', question: 'Quanto tempo demora para desbloquear via PIX?', answer: 'Via PIX o desbloqueio ocorre em poucos minutos com internet ativa.' },
+    { intent: 'Boleto', question: 'Quantos dias leva para compensar código de barras?', answer: 'Pagamentos via boleto levam até 3 dias úteis.' },
+  ]);
+  const results = svc.getRelevantExamples('fiz o pix quanto tempo demora para desbloquear', 2);
+  assert.ok(results.length >= 1, 'deve encontrar exemplo relevante via FTS5');
+  assert.match(results[0].answer, /poucos minutos/i, 'o primeiro resultado deve ser o de desbloqueio PIX');
+});
+
+console.log(`\nSQLite services smoke: ${passed}/6 cenários passaram`);
 if (failures.length > 0) process.exitCode = 1;

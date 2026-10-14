@@ -208,11 +208,54 @@ export class TrainingService {
   }
 
   /**
-   * Format rules + QA examples as a prompt block for the autonomous agent.
-   * Newest QAs first (learning order), capped by example count AND a total
-   * character budget so the context window stays healthy.
+   * Busca contextual BM25 via SQLite FTS5: retorna os exemplos de Q&A mais
+   * relevantes para a dúvida atual do cliente. Degrada para os mais recentes se
+   * não houver termos de busca ou se FTS5 não encontrar correspondência.
    */
-  getPromptBlock(maxExamples = 40): string {
+  getRelevantExamples(userQuery: string, limit = 6): QAExample[] {
+    const STOP_WORDS = new Set([
+      'para', 'como', 'qual', 'quais', 'quero', 'preciso', 'voces', 'voce',
+      'meu', 'minha', 'esta', 'isso', 'esse', 'essa', 'uma', 'uns', 'umas',
+      'com', 'sem', 'por', 'que', 'nao', 'sim', 'bom', 'boa', 'dia', 'tarde', 'noite',
+    ]);
+    const terms = normalizeKey(userQuery)
+      .split(' ')
+      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+      .slice(0, 8)
+      .map((w) => `"${w}"*`)
+      .join(' OR ');
+
+    if (!terms) {
+      return this.getTraining().qaExamples.slice(0, limit);
+    }
+
+    try {
+      const matched = this.db
+        .prepare(
+          `SELECT q.intent, q.question, q.answer
+           FROM training_qas_fts f
+           JOIN training_qas q ON q.id = f.rowid
+           WHERE training_qas_fts MATCH ?
+           ORDER BY bm25(training_qas_fts, 1.0, 3.0, 0.5), q.ord ASC
+           LIMIT ?`
+        )
+        .all(terms, limit) as unknown as QAExample[];
+      if (matched.length > 0) return matched;
+    } catch (err) {
+      logger.debug(
+        { error: err instanceof Error ? err.message : String(err) },
+        'FTS5 query fallback to recency list'
+      );
+    }
+    return this.getTraining().qaExamples.slice(0, limit);
+  }
+
+  /**
+   * Format rules + QA examples as a prompt block for the autonomous agent.
+   * When `userQuery` is provided, prioritizes relevant QAs via FTS5 BM25 before
+   * filling remaining budget with the newest QAs.
+   */
+  getPromptBlock(maxExamples = 40, userQuery?: string): string {
     const { customRules, qaExamples } = this.getTraining();
     const parts: string[] = [];
 
@@ -223,8 +266,15 @@ export class TrainingService {
       );
     }
 
-    // qaExamples are stored newest-first (see learnFromExchange).
-    const examples = qaExamples.slice(0, maxExamples);
+    let orderedExamples = qaExamples;
+    if (userQuery && userQuery.trim().length > 0) {
+      const relevant = this.getRelevantExamples(userQuery, Math.min(10, maxExamples));
+      const seenKeys = new Set(relevant.map((q) => normalizeKey(q.question)));
+      const rest = qaExamples.filter((q) => !seenKeys.has(normalizeKey(q.question)));
+      orderedExamples = [...relevant, ...rest];
+    }
+
+    const examples = orderedExamples.slice(0, maxExamples);
     const exampleParts: string[] = [];
     let usedChars = parts.join('\n\n').length;
 

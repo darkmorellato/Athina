@@ -347,6 +347,11 @@ export default function useSocket() {
     socket.emit('reset-stats');
   }, []);
 
+  const releaseHumanTakeover = useCallback((contactId: string) => {
+    if (!contactId) return;
+    socket.emit('release-human-takeover', { contactId });
+  }, []);
+
   return {
     socket,
     isConnected,
@@ -389,5 +394,6 @@ export default function useSocket() {
     updateTrainingQas,
     refreshStats,
     resetStats,
+    releaseHumanTakeover,
   };
 }

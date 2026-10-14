@@ -60,6 +60,16 @@ export interface ChatFlowData {
   installments?: ChatInstallmentSummary[];
   bloqueioMetodo?: 'pix' | 'boleto';
   humanTopic?: string;
+  /** Intenção capturada antes da identificação terminar (Slot Jumping). */
+  deferredIntent?: 'PAGAR_BOLETO' | 'VERIFICAR_SALDO' | 'CELULAR_BLOQUEADO' | 'INFORMAR_JA_PAGUEI' | 'FALAR_COM_ATENDENTE';
+  /** Contador de fallbacks consecutivos no estágio atual. */
+  fallbackCount?: number;
+  /** Histórico curto da conversa para contexto NLU. */
+  recentTurns?: Array<{ role: 'user' | 'assistant'; content: string; at: number }>;
+  /** Timestamp (ms) de quando os dados do contrato no Paymobi foram consultados. */
+  contractFetchedAt?: number;
+  /** Timestamp (ms) até quando o atendente humano assumiu a conversa. */
+  humanTakeoverUntil?: number;
 }
 
 export interface ChatState {
@@ -236,6 +246,53 @@ class ChatStateService {
   /** Transição do roteiro determinístico 24/7 — grava estágio + dados do fluxo. */
   async setFlowState(contactId: string, stage: ChatStage, flow: ChatFlowData | null): Promise<void> {
     await this.setState(contactId, { stage, flow });
+  }
+
+  /** Persiste o takeover humano no SQLite (sobrevive a reinícios do processo). */
+  setHumanTakeoverSync(contactId: string, durationMs = 10 * 60 * 1000): number {
+    const id = sanitizeContactId(contactId);
+    const existing = this.readStateSync(id);
+    const until = Date.now() + durationMs;
+    const nextFlow: ChatFlowData = {
+      ...(existing?.flow ?? {}),
+      humanTakeoverUntil: until,
+    };
+    const next = this.buildState(existing, { flow: nextFlow });
+    getDb()
+      .prepare(
+        `INSERT INTO chat_states (contact_id, state, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(contact_id) DO UPDATE SET state = excluded.state, expires_at = excluded.expires_at`
+      )
+      .run(id, JSON.stringify(next), Date.now() + STATE_TTL_MS);
+    return until;
+  }
+
+  /** Remove o takeover humano persistido no SQLite, devolvendo o contato ao robô. */
+  clearHumanTakeoverSync(contactId: string): void {
+    const id = sanitizeContactId(contactId);
+    const existing = this.readStateSync(id);
+    if (!existing?.flow?.humanTakeoverUntil) return;
+    const nextFlow: ChatFlowData = { ...existing.flow };
+    delete nextFlow.humanTakeoverUntil;
+    const next = this.buildState(existing, { flow: nextFlow });
+    getDb()
+      .prepare(
+        `INSERT INTO chat_states (contact_id, state, expires_at) VALUES (?, ?, ?)
+         ON CONFLICT(contact_id) DO UPDATE SET state = excluded.state, expires_at = excluded.expires_at`
+      )
+      .run(id, JSON.stringify(next), Date.now() + STATE_TTL_MS);
+  }
+
+  /** Verifica de forma síncrona se há takeover humano ativo no SQLite para o contato. */
+  isHumanTakeoverActiveSync(contactId: string): boolean {
+    try {
+      const id = sanitizeContactId(contactId);
+      const existing = this.readStateSync(id);
+      const until = existing?.flow?.humanTakeoverUntil;
+      return typeof until === 'number' && until > Date.now();
+    } catch {
+      return false;
+    }
   }
 
   /** Remove o estado de um contato. */

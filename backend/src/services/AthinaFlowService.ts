@@ -19,15 +19,18 @@
 import { LRUCache } from 'lru-cache';
 import logger from '../utils/logger.js';
 import { maskDocument, maskName } from '../utils/redact.js';
-import { isGreeting, isFullName } from '../utils/conversationPatterns.js';
+import { isGreeting, extractPlausibleDocument, extractNameFromText } from '../utils/conversationPatterns.js';
 import whatsAppService from './WhatsAppService.js';
-import chatStateService, { type ChatFlowData, type ChatState } from './ChatStateService.js';
+import chatStateService, { type ChatFlowData, type ChatStage, type ChatState } from './ChatStateService.js';
 import analyticsService from './AnalyticsService.js';
-import { PaymobiScraperService } from './PaymobiScraperService.js';
+import { PaymobiScraperService, extractPixBounded } from './PaymobiScraperService.js';
+import dialogueNluService, { type NluDecision } from './DialogueNluService.js';
+import type { DeferredIntent } from '@shared/contracts.js';
 import config from '../config/index.js';
 import { getDb, getMeta, setMeta } from './db.js';
 import { sanitizeForWhatsApp } from '../utils/sanitizeForWhatsApp.js';
 import { downloadMediaBounded, analyzeReceipt, type DownloadedMedia, type ReceiptAnalysis, type ReceiptKind } from './helpers/receiptAnalysisHelper.js';
+import { transcribeAudioMedia } from './helpers/audioTranscriptionHelper.js';
 import { notifyHumanAgents } from './helpers/humanHandoffHelper.js';
 import type { PaymobiResult } from '../types/index.js';
 import * as msg from './athinaMessages.js';
@@ -47,8 +50,10 @@ interface FlowIncomingMessage {
 
 export interface AthinaFlowDeps {
   sendMessage: (to: string, text: string) => Promise<void>;
-  consultarPaymobi: (query: string, clientName?: string) => Promise<PaymobiResult>;
+  consultarPaymobi: (query: string, clientName?: string, options?: { skipPix?: boolean }) => Promise<PaymobiResult>;
+  resolvePix: (boletoUrl: string) => Promise<{ pixCode: string; pixUrl: string; qrCodePath: string }>;
   analyzeReceipt: (media: DownloadedMedia) => Promise<ReceiptAnalysis>;
+  transcribeAudio: (media: DownloadedMedia) => Promise<string | null>;
   notifyHumans: (payload: {
     client: { nome: string; cpf: string; imei: string };
     reason: string;
@@ -58,12 +63,17 @@ export interface AthinaFlowDeps {
   isReady: () => boolean;
   /** Atraso "humano" antes de cada resposta (ms) — injetável para testes (sem espera real). */
   replyDelayMs: () => number;
+  /** Janela de debounce (ms) para agrupar mensagens picadas do mesmo cliente (0 = desativado). */
+  debounceMs: () => number;
   /** Relógio do atendimento — injetável para testar horário de expediente. */
   now: () => Date;
 }
 
 const MAX_PROCESSED_IDS = 2000;
-const MAIN_MENU_OPTIONS = new Set(['1', '2', '3', '4']);
+/** Tempo em que os dados do contrato recém-consultado no Paymobi permanecem válidos em cache (5 min). */
+const CONTRACT_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Limite de tentativas incompreendidas consecutivas antes de transferir para atendente humano. */
+const MAX_FALLBACK_STRIKES = 3;
 
 function humanDelayMs(): number {
   const options = [2000, 3000, 4000, 5000, 7000];
@@ -91,6 +101,16 @@ export function describeReceiptForOperator(analysis: ReceiptAnalysis, declared: 
 export class AthinaFlowService {
   private deps: AthinaFlowDeps;
   private pending: Map<string, Promise<void>> = new Map();
+  private debounceBuffers: Map<
+    string,
+    {
+      texts: string[];
+      lastRaw: FlowIncomingMessage;
+      timer: ReturnType<typeof setTimeout>;
+      promise: Promise<void>;
+      resolve: () => void;
+    }
+  > = new Map();
   private processedIds = new Set<string>();
   private processedOrder: string[] = [];
   private humanTakeover = new LRUCache<string, number>({ max: 500, ttl: 10 * 60 * 1000 });
@@ -103,12 +123,15 @@ export class AthinaFlowService {
     this.deps = {
       sendMessage: deps?.sendMessage ?? this.defaultSendMessage,
       consultarPaymobi: deps?.consultarPaymobi ?? this.defaultConsultarPaymobi,
+      resolvePix: deps?.resolvePix ?? extractPixBounded,
       analyzeReceipt: deps?.analyzeReceipt ?? analyzeReceipt,
+      transcribeAudio: deps?.transcribeAudio ?? transcribeAudioMedia,
       notifyHumans: deps?.notifyHumans ?? this.defaultNotifyHumans,
       isReady:
         deps?.isReady ??
         (() => whatsAppService.getClientState() === 'READY' && Boolean(whatsAppService.getClient())),
       replyDelayMs: deps?.replyDelayMs ?? humanDelayMs,
+      debounceMs: deps?.debounceMs ?? (() => 0),
       now: deps?.now ?? (() => new Date()),
     };
   }
@@ -147,14 +170,35 @@ export class AthinaFlowService {
     return this.recentInbound.get(contactId) ?? null;
   }
 
-  /** Um atendente humano respondeu pelo painel — a Athina fica em silêncio por um tempo. */
+  /** Um atendente humano respondeu pelo painel — a Athina fica em silêncio por um tempo (persistido em SQLite). */
   noteHumanReply(contactId: string): void {
     if (!contactId) return;
     this.humanTakeover.set(contactId, Date.now());
+    try {
+      chatStateService.setHumanTakeoverSync(contactId);
+    } catch {
+      /* contato não sanitizável — mantém em memória */
+    }
   }
 
-  private isHumanTakeover(contactId: string): boolean {
-    return this.humanTakeover.has(contactId);
+  /** Devolve o contato para o atendimento automático da Athina imediatamente. */
+  releaseHumanTakeover(contactId: string): void {
+    if (!contactId) return;
+    this.humanTakeover.delete(contactId);
+    try {
+      chatStateService.clearHumanTakeoverSync(contactId);
+    } catch {
+      /* ignora */
+    }
+  }
+
+  isHumanTakeover(contactId: string): boolean {
+    if (this.humanTakeover.has(contactId)) return true;
+    if (chatStateService.isHumanTakeoverActiveSync(contactId)) {
+      this.humanTakeover.set(contactId, Date.now());
+      return true;
+    }
+    return false;
   }
 
   // ─── Entry point ──────────────────────────────────────────────────────────
@@ -182,6 +226,44 @@ export class AthinaFlowService {
       }
     }
 
+    const debounceWindow = this.deps.debounceMs();
+    if (debounceWindow > 0 && !raw.hasMedia && text) {
+      const existing = this.debounceBuffers.get(from);
+      if (existing) {
+        existing.texts.push(text);
+        existing.lastRaw = raw;
+        clearTimeout(existing.timer);
+        existing.timer = setTimeout(() => this.flushDebounce(from), debounceWindow);
+        return existing.promise;
+      }
+      let resolvePromise!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        resolvePromise = resolve;
+      });
+      const timer = setTimeout(() => this.flushDebounce(from), debounceWindow);
+      this.debounceBuffers.set(from, {
+        texts: [text],
+        lastRaw: raw,
+        timer,
+        promise,
+        resolve: resolvePromise,
+      });
+      return promise;
+    }
+
+    return this.enqueueMessage(from, text, raw);
+  }
+
+  private flushDebounce(from: string): void {
+    const entry = this.debounceBuffers.get(from);
+    if (!entry) return;
+    this.debounceBuffers.delete(from);
+    const combinedText = entry.texts.join('\n');
+    const mergedRaw: FlowIncomingMessage = { ...entry.lastRaw, body: combinedText };
+    void this.enqueueMessage(from, combinedText, mergedRaw).finally(() => entry.resolve());
+  }
+
+  private enqueueMessage(from: string, text: string, raw: FlowIncomingMessage): Promise<void> {
     const previous = this.pending.get(from) ?? Promise.resolve();
     const task = previous
       .then(() => {
@@ -209,62 +291,111 @@ export class AthinaFlowService {
 
     const state = (await chatStateService.getState(contactId)) ?? { stage: 'COLLECTING', createdAt: Date.now(), updatedAt: Date.now() };
 
-    // Mídia sem texto fora do fluxo de comprovante (único estágio que espera
-    // mídia) — orienta o cliente em vez de tratar o corpo vazio como resposta.
-    if (raw.hasMedia && !text && state.stage !== 'WAITING_RECEIPT') {
-      await this.reply(contactId, flowText('mediaGuidance'));
+    let effectiveText = text;
+
+    // Mídia sem texto fora do fluxo de comprovante: se for nota de voz (áudio),
+    // tenta transcrever (STT) e seguir o diálogo normalmente; senão orienta o cliente.
+    if (raw.hasMedia && !effectiveText && state.stage !== 'WAITING_RECEIPT') {
+      if (typeof raw.downloadMedia === 'function') {
+        const media = await downloadMediaBounded({
+          hasMedia: raw.hasMedia,
+          downloadMedia: () => raw.downloadMedia!.call(raw),
+        });
+        if (media && media.mimetype.startsWith('audio/')) {
+          const transcribed = await this.deps.transcribeAudio(media);
+          if (transcribed && transcribed.trim().length > 0) {
+            effectiveText = transcribed.trim();
+            this.recentInbound.set(contactId, effectiveText.slice(0, 2000));
+          }
+        }
+      }
+      if (!effectiveText) {
+        await this.reply(contactId, flowText('mediaGuidance'));
+        return;
+      }
+    }
+
+    const nlu = await dialogueNluService.interpret({
+      text: effectiveText,
+      stage: state.stage,
+      recentTurns: state.flow?.recentTurns,
+    });
+
+    // Escalonamento imediato por sentimento hostil quando o cliente já está identificado
+    if (nlu.sentiment === 'HOSTILE' && state.flow?.client) {
+      await this.reply(contactId, msg.buildTransferToSpecialistText('atender sua solicitação com prioridade'));
+      await this.handoffToHumans({
+        contactId,
+        client: this.clientForHandoff(state.flow),
+        reason: 'Cliente insatisfeito / linguagem hostil detectada',
+        details: `Escalonamento automático por sentimento hostil na etapa ${state.stage}: "${effectiveText.slice(0, 300)}"`,
+      });
+      await chatStateService.resetFlowState(contactId);
       return;
     }
 
     switch (state.stage) {
       case 'MAIN_MENU':
-        await this.handleMainMenu(contactId, text, state);
+        await this.handleMainMenu(contactId, effectiveText, state, nlu);
         return;
       case 'BOLETO_CONFIRM':
-        await this.handleBoletoConfirm(contactId, text, state);
+        await this.handleBoletoConfirm(contactId, effectiveText, state, nlu);
         return;
       case 'BOLETO_MULTI_CONFIRM':
-        await this.handleBoletoMultiConfirm(contactId, text, state);
+        await this.handleBoletoMultiConfirm(contactId, effectiveText, state, nlu);
         return;
       case 'SALDO_FOLLOWUP':
-        await this.handleSaldoFollowup(contactId, text, state);
+        await this.handleSaldoFollowup(contactId, effectiveText, state, nlu);
         return;
       case 'BLOQUEIO_MENU':
-        await this.handleBloqueioMenu(contactId, text, state);
+        await this.handleBloqueioMenu(contactId, effectiveText, state, nlu);
         return;
       case 'BLOQUEIO_METODO':
-        await this.handleBloqueioMetodo(contactId, text, state);
+        await this.handleBloqueioMetodo(contactId, effectiveText, state, nlu);
         return;
       case 'WAITING_RECEIPT':
         await this.handleWaitingReceipt(contactId, state, raw);
         return;
       case 'HUMAN_TOPIC':
-        await this.handleHumanTopic(contactId, text, state);
+        await this.handleHumanTopic(contactId, effectiveText, state);
         return;
       case 'HUMAN_TOPIC_CONFIRM':
-        await this.handleHumanTopicConfirm(contactId, text, state);
+        await this.handleHumanTopicConfirm(contactId, effectiveText, state, nlu);
         return;
       case 'WAITING_CONFIRMATION':
       case 'COLLECTING':
       default:
-        await this.handleCollecting(contactId, text, state);
+        await this.handleCollecting(contactId, effectiveText, state, nlu);
         return;
     }
   }
 
-  // ─── Estágio: COLLECTING (nome + CPF/IMEI, um por vez) ─────────────────────
+  // ─── Estágio: COLLECTING (nome + CPF/IMEI, com suporte a Slot Jumping) ────
 
-  private async handleCollecting(contactId: string, text: string, state: ChatState): Promise<void> {
+  private async handleCollecting(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const collect = state.collect;
-    const cleanDigits = text.replace(/\D/g, '');
-    const hasDoc = cleanDigits.length === 11 || cleanDigits.length === 15;
-    const textWithoutNumbers = text.replace(/[0-9\n\r\t.\-/]/g, ' ').replace(/\s+/g, ' ').trim();
-    const hasName = isFullName(textWithoutNumbers);
-    const nameCandidate = hasName ? textWithoutNumbers : '';
+    const extractedDoc = nlu.extractedDoc ?? extractPlausibleDocument(text);
+    const hasDoc = extractedDoc !== null;
+    const cleanDigits = extractedDoc?.digits ?? '';
+    const extractedName = nlu.extractedName ?? extractNameFromText(text);
+    const hasName = extractedName !== null;
+    const nameCandidate = extractedName ?? '';
 
     const activeName = nameCandidate || collect?.name || '';
     const activeDoc = hasDoc ? cleanDigits : collect?.doc || '';
     const bringsNewData = hasName || hasDoc;
+    const deferredIntent = nlu.deferredIntent ?? state.flow?.deferredIntent;
+    const bloqueioMetodo = nlu.paymentMethod ?? state.flow?.bloqueioMetodo;
+    const flowMeta: ChatFlowData = {
+      ...(state.flow ?? {}),
+      ...(deferredIntent ? { deferredIntent } : {}),
+      ...(bloqueioMetodo ? { bloqueioMetodo } : {}),
+    };
 
     const userDoesNotKnow = /\b(n[aã]o\s+sei|n[aã]o\s+lembr|esquec|n[aã]o\s+tenh|perdi|onde\s+vejo|como\s+vejo|como\s+olho)\b/i.test(
       text
@@ -280,26 +411,47 @@ export class AthinaFlowService {
     }
 
     if (activeName && activeDoc && bringsNewData) {
-      await chatStateService.setState(contactId, { stage: 'COLLECTING', collect: { name: activeName.slice(0, 120), doc: activeDoc.slice(0, 30) } });
+      await chatStateService.setState(contactId, {
+        stage: 'COLLECTING',
+        collect: { name: activeName.slice(0, 120), doc: activeDoc.slice(0, 30) },
+        flow: flowMeta,
+      });
       await this.reply(contactId, msg.buildLookupWaitText());
-      await this.runLookup(contactId, activeName, activeDoc);
+      await this.runLookup(contactId, activeName, activeDoc, {
+        deferredIntent,
+        bloqueioMetodo,
+      });
       return;
     }
 
     if (hasDoc && !activeName) {
-      await chatStateService.setState(contactId, { stage: 'COLLECTING', collect: { ...collect, doc: cleanDigits.slice(0, 30) } });
+      await chatStateService.setState(contactId, {
+        stage: 'COLLECTING',
+        collect: { ...collect, doc: cleanDigits.slice(0, 30) },
+        flow: flowMeta,
+      });
       await this.reply(contactId, msg.buildAskNameText());
       return;
     }
 
     if (hasName && !activeDoc) {
-      await chatStateService.setState(contactId, { stage: 'COLLECTING', collect: { ...collect, name: nameCandidate.slice(0, 120) } });
+      await chatStateService.setState(contactId, {
+        stage: 'COLLECTING',
+        collect: { ...collect, name: nameCandidate.slice(0, 120) },
+        flow: flowMeta,
+      });
       await this.reply(contactId, msg.buildAskDocText(activeName));
       return;
     }
 
-    if (isGreeting(text) && !hasDoc && !hasName) {
+    if (isGreeting(text) && !hasDoc && !hasName && !deferredIntent) {
       await chatStateService.resetFlowState(contactId);
+      await this.reply(contactId, msg.buildWelcomeText());
+      return;
+    }
+
+    if (deferredIntent && !activeName && !activeDoc) {
+      await chatStateService.setState(contactId, { stage: 'COLLECTING', flow: flowMeta });
       await this.reply(contactId, msg.buildWelcomeText());
       return;
     }
@@ -312,21 +464,32 @@ export class AthinaFlowService {
       return;
     }
     if (activeName) {
+      await chatStateService.setState(contactId, { stage: 'COLLECTING', flow: flowMeta });
       await this.reply(contactId, msg.buildAskDocText(activeName));
       return;
     }
     await this.reply(contactId, msg.buildWelcomeText());
   }
 
-  private async runLookup(contactId: string, name: string, doc: string): Promise<void> {
+  private async runLookup(
+    contactId: string,
+    name: string,
+    doc: string,
+    extra?: { deferredIntent?: DeferredIntent; bloqueioMetodo?: 'pix' | 'boleto' }
+  ): Promise<void> {
     logger.info({ contactId, doc: maskDocument(doc), name: maskName(name) }, '[AthinaFlow] Consultando Paymobi');
-    const result = await this.deps.consultarPaymobi(doc, name);
+    const result = await this.deps.consultarPaymobi(doc, name, { skipPix: true });
 
     if (!result.success || !result.data) {
       await this.reply(contactId, result.message);
-      // Mantém o NOME já informado — a mensagem de "não encontrado" só pede
-      // para conferir o CPF/CNPJ ou enviar o IMEI, não para recomeçar do zero.
-      await chatStateService.setState(contactId, { stage: 'COLLECTING', collect: { name } });
+      // Mantém o NOME e a intenção já informados para não obrigar o cliente a repetir tudo
+      await chatStateService.setState(contactId, {
+        stage: 'COLLECTING',
+        collect: { name },
+        ...(extra?.deferredIntent
+          ? { flow: { deferredIntent: extra.deferredIntent, bloqueioMetodo: extra.bloqueioMetodo } }
+          : {}),
+      });
       return;
     }
 
@@ -336,70 +499,145 @@ export class AthinaFlowService {
       statusContrato: result.data.statusContrato,
       overdueCount: result.data.overdueCount ?? (result.data.statusContrato === 'atraso' ? 1 : 0),
       installments: result.data.installments,
+      parcela: result.data.parcela,
+      contractFetchedAt: this.deps.now().getTime(),
+      fallbackCount: 0,
     };
+
+    // Slot Jumping: se o cliente já declarou a intenção durante a identificação, executa direto!
+    if (extra?.deferredIntent) {
+      await analyticsService.trackIntent(extra.deferredIntent);
+      await this.executeIntentFromMenu(contactId, extra.deferredIntent, flow, extra.bloqueioMetodo);
+      return;
+    }
+
     await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
     await this.reply(contactId, msg.buildMainMenuText(result.data.client));
   }
 
-  // ─── Estágio: MAIN_MENU (1-Pagar Boleto / 2-Saldo / 3-Bloqueado / 4-Atendente) ──
+  /** Executa uma intenção de menu principal (ou salto de etapa direto para envio de comprovante). */
+  private async executeIntentFromMenu(
+    contactId: string,
+    intent: DeferredIntent,
+    flow: ChatFlowData,
+    paymentMethod?: 'pix' | 'boleto' | null
+  ): Promise<void> {
+    const cleanFlow: ChatFlowData = { ...flow, deferredIntent: undefined, fallbackCount: 0 };
 
-  private async handleMainMenu(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
-    const flow = state.flow ?? {};
-    if (!MAIN_MENU_OPTIONS.has(choice)) {
-      await this.reply(contactId, msg.buildInvalidMenuChoiceText(msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' })));
-      return;
-    }
-
-    if (choice === '1') {
+    if (intent === 'PAGAR_BOLETO') {
       await this.reply(contactId, msg.buildProcessingText());
-      await this.handlePagarBoleto(contactId, flow);
+      await this.handlePagarBoleto(contactId, cleanFlow);
       return;
     }
-    if (choice === '2') {
+    if (intent === 'VERIFICAR_SALDO') {
       await this.reply(contactId, msg.buildProcessingText());
-      await this.handleVerificarSaldo(contactId, flow);
+      await this.handleVerificarSaldo(contactId, cleanFlow);
       return;
     }
-    if (choice === '3') {
-      await chatStateService.setFlowState(contactId, 'BLOQUEIO_MENU', flow);
+    if (intent === 'INFORMAR_JA_PAGUEI') {
+      if (paymentMethod === 'pix' || paymentMethod === 'boleto') {
+        await chatStateService.setFlowState(contactId, 'WAITING_RECEIPT', {
+          ...cleanFlow,
+          bloqueioMetodo: paymentMethod,
+        });
+        await this.reply(contactId, msg.buildAguardandoComprovanteText(paymentMethod));
+        return;
+      }
+      await chatStateService.setFlowState(contactId, 'BLOQUEIO_METODO', cleanFlow);
+      await this.reply(contactId, msg.buildBloqueioMetodoText());
+      return;
+    }
+    if (intent === 'CELULAR_BLOQUEADO') {
+      await chatStateService.setFlowState(contactId, 'BLOQUEIO_MENU', cleanFlow);
       await this.reply(contactId, msg.buildBloqueioMenuText());
       return;
     }
-    // choice === '4'
-    await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', flow);
+    // FALAR_COM_ATENDENTE
+    await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', cleanFlow);
     await this.reply(contactId, msg.buildHumanTopicText());
   }
 
-  /** Reconsulta o Paymobi (dados já coletados) e decide em-dia / 1 atraso / 2+ atraso. */
-  private async handlePagarBoleto(contactId: string, flow: ChatFlowData): Promise<void> {
-    const doc = flow.client?.cpf || flow.client?.imei || '';
-    const result = await this.deps.consultarPaymobi(doc.replace(/\D/g, ''), flow.client?.nome);
-    if (!result.success || !result.data) {
-      await this.reply(contactId, result.message);
-      await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
+  // ─── Estágio: MAIN_MENU (1-Pagar Boleto / 2-Saldo / 3-Bloqueado / 4-Atendente + NLU) ──
+
+  private async handleMainMenu(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
+    const flow = state.flow ?? {};
+    const mappedIntent: DeferredIntent | null =
+      nlu.intent === 'PAGAR_BOLETO' ||
+      nlu.intent === 'VERIFICAR_SALDO' ||
+      nlu.intent === 'CELULAR_BLOQUEADO' ||
+      nlu.intent === 'INFORMAR_JA_PAGUEI' ||
+      nlu.intent === 'FALAR_COM_ATENDENTE'
+        ? nlu.intent
+        : null;
+
+    if (!mappedIntent) {
+      await this.handleStageFallback(
+        contactId,
+        'MAIN_MENU',
+        flow,
+        msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' }),
+        text
+      );
       return;
     }
 
-    const overdueCount = result.data.overdueCount ?? 0;
-    const nextFlow: ChatFlowData = {
-      ...flow,
-      client: result.data.client,
-      statusContrato: result.data.statusContrato,
-      overdueCount,
-      installments: result.data.installments ?? flow.installments,
-    };
+    await analyticsService.trackIntent(mappedIntent);
+    await this.executeIntentFromMenu(contactId, mappedIntent, flow, nlu.paymentMethod);
+  }
 
-    if (overdueCount === 0 || !result.data.parcela) {
+  private isContractCacheFresh(flow: ChatFlowData): boolean {
+    if (!flow.client || !flow.contractFetchedAt) return false;
+    return this.deps.now().getTime() - flow.contractFetchedAt < CONTRACT_CACHE_TTL_MS;
+  }
+
+  /** Reutiliza o contrato em cache (<5min) ou reconsulta o Paymobi e decide em-dia / 1 atraso / 2+ atraso. */
+  private async handlePagarBoleto(contactId: string, flow: ChatFlowData): Promise<void> {
+    let nextFlow: ChatFlowData = { ...flow };
+
+    if (!this.isContractCacheFresh(flow)) {
+      const doc = flow.client?.cpf || flow.client?.imei || '';
+      const result = await this.deps.consultarPaymobi(doc.replace(/\D/g, ''), flow.client?.nome, { skipPix: true });
+      if (!result.success || !result.data) {
+        await this.reply(contactId, result.message);
+        await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
+        return;
+      }
+      nextFlow = {
+        ...flow,
+        client: result.data.client,
+        statusContrato: result.data.statusContrato,
+        overdueCount: result.data.overdueCount ?? 0,
+        installments: result.data.installments ?? flow.installments,
+        parcela: result.data.parcela,
+        contractFetchedAt: this.deps.now().getTime(),
+      };
+    }
+
+    const overdueCount = nextFlow.overdueCount ?? 0;
+    const clientData = nextFlow.client!;
+
+    if (overdueCount === 0 || !nextFlow.parcela) {
       await this.reply(contactId, msg.buildEmDiaText());
       await chatStateService.setFlowState(contactId, 'MAIN_MENU', nextFlow);
-      await this.reply(contactId, msg.buildMainMenuText(result.data.client));
+      await this.reply(contactId, msg.buildMainMenuText(clientData));
       return;
     }
 
     if (overdueCount === 1) {
-      await chatStateService.setFlowState(contactId, 'BOLETO_CONFIRM', { ...nextFlow, parcela: result.data.parcela });
-      await this.reply(contactId, msg.buildBoletoSingleConfirmText(result.data.client, result.data.parcela));
+      let parcela = nextFlow.parcela;
+      // Lazy PIX extraction: só abre o navegador para extrair o PIX quando o cliente pede para pagar 1 parcela
+      if (parcela.boletoUrl && !parcela.pixCode) {
+        const pix = await this.deps.resolvePix(parcela.boletoUrl);
+        parcela = { ...parcela, ...pix };
+      }
+      const updatedFlow = { ...nextFlow, parcela };
+      await chatStateService.setFlowState(contactId, 'BOLETO_CONFIRM', updatedFlow);
+      await this.reply(contactId, msg.buildBoletoSingleConfirmText(clientData, parcela));
       return;
     }
 
@@ -409,25 +647,37 @@ export class AthinaFlowService {
   }
 
   private async handleVerificarSaldo(contactId: string, flow: ChatFlowData): Promise<void> {
-    const doc = flow.client?.cpf || flow.client?.imei || '';
-    const result = await this.deps.consultarPaymobi(doc.replace(/\D/g, ''), flow.client?.nome);
-    if (!result.success || !result.data) {
-      await this.reply(contactId, result.message);
-      await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
-      return;
+    let nextFlow: ChatFlowData = { ...flow };
+    if (!this.isContractCacheFresh(flow) || !flow.installments) {
+      const doc = flow.client?.cpf || flow.client?.imei || '';
+      const result = await this.deps.consultarPaymobi(doc.replace(/\D/g, ''), flow.client?.nome, { skipPix: true });
+      if (!result.success || !result.data) {
+        await this.reply(contactId, result.message);
+        await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
+        return;
+      }
+      nextFlow = {
+        ...flow,
+        client: result.data.client,
+        installments: result.data.installments ?? [],
+        contractFetchedAt: this.deps.now().getTime(),
+      };
     }
-    const installments = result.data.installments ?? [];
-    const nextFlow: ChatFlowData = { ...flow, client: result.data.client, installments };
+    const installments = nextFlow.installments ?? [];
     await chatStateService.setFlowState(contactId, 'SALDO_FOLLOWUP', nextFlow);
-    await this.reply(contactId, msg.buildSaldoDetailText(result.data.client, installments));
+    await this.reply(contactId, msg.buildSaldoDetailText(nextFlow.client!, installments));
   }
 
   // ─── Estágio: BOLETO_CONFIRM ("os dados acima estão corretos? 1/2") ────────
 
-  private async handleBoletoConfirm(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleBoletoConfirm(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice === '1' && flow.parcela) {
+    if (nlu.intent === 'CONFIRM_YES' && flow.parcela) {
       await this.reply(contactId, msg.buildPixDeliveryText(flow.parcela));
       if (flow.parcela.pixCode) {
         await this.reply(contactId, flow.parcela.pixCode);
@@ -437,25 +687,39 @@ export class AthinaFlowService {
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    if (choice === '2') {
+    if (nlu.intent === 'CONFIRM_NO') {
       await this.reply(contactId, msg.buildBoletoDataWrongText());
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    await this.reply(
+    if (nlu.intent === 'FALAR_COM_ATENDENTE') {
+      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', { ...flow, fallbackCount: 0 });
+      await this.reply(contactId, msg.buildHumanTopicText());
+      return;
+    }
+    if (!flow.client || !flow.parcela) {
+      await this.reply(contactId, msg.buildWelcomeText());
+      return;
+    }
+    await this.handleStageFallback(
       contactId,
-      flow.client && flow.parcela
-        ? msg.buildInvalidMenuChoiceText(opts('Sim, quero o boleto', 'Não, está errado'))
-        : msg.buildWelcomeText()
+      'BOLETO_CONFIRM',
+      flow,
+      opts('Sim, quero o boleto', 'Não, está errado'),
+      text
     );
   }
 
   // ─── Estágio: BOLETO_MULTI_CONFIRM ("quer regularizar? 1/2") ───────────────
 
-  private async handleBoletoMultiConfirm(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleBoletoMultiConfirm(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice === '1') {
+    if (nlu.intent === 'CONFIRM_YES' || nlu.intent === 'FALAR_COM_ATENDENTE') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('regularizar suas parcelas em atraso'));
       await this.handoffToHumans({
         contactId,
@@ -466,68 +730,120 @@ export class AthinaFlowService {
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    if (choice === '2') {
+    if (nlu.intent === 'CONFIRM_NO') {
       await this.reply(contactId, msg.buildPoliteDeclineText());
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    await this.reply(contactId, msg.buildInvalidMenuChoiceText(opts('Sim, quero regularizar minhas pendências', 'Não, obrigado')));
+    await this.handleStageFallback(
+      contactId,
+      'BOLETO_MULTI_CONFIRM',
+      flow,
+      opts('Sim, quero regularizar minhas pendências', 'Não, obrigado'),
+      text
+    );
   }
 
   // ─── Estágio: SALDO_FOLLOWUP ("algo mais? 1/2") ────────────────────────────
 
-  private async handleSaldoFollowup(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleSaldoFollowup(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice === '1') {
-      await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
+    if (nlu.intent === 'CONFIRM_YES' || nlu.intent === 'BACK_TO_MENU') {
+      await chatStateService.setFlowState(contactId, 'MAIN_MENU', { ...flow, fallbackCount: 0 });
       await this.reply(contactId, msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' }));
       return;
     }
-    if (choice === '2') {
+    if (nlu.intent === 'CONFIRM_NO') {
       await this.reply(contactId, msg.buildClosingText());
       await analyticsService.increment('autoResolved');
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    await this.reply(contactId, msg.buildInvalidMenuChoiceText(opts('Sim', 'Não')));
+    await this.handleStageFallback(contactId, 'SALDO_FOLLOWUP', flow, opts('Sim', 'Não'), text);
   }
 
   // ─── Estágio: BLOQUEIO_MENU ("1 pagar / 2 já paguei / 3 voltar") ───────────
 
-  private async handleBloqueioMenu(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleBloqueioMenu(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice === '1') {
+    if (nlu.intent === 'PAGAR_BOLETO') {
       await this.reply(contactId, msg.buildProcessingText());
-      await this.handlePagarBoleto(contactId, flow);
+      await this.handlePagarBoleto(contactId, { ...flow, fallbackCount: 0 });
       return;
     }
-    if (choice === '2') {
-      await chatStateService.setFlowState(contactId, 'BLOQUEIO_METODO', flow);
+    if (nlu.intent === 'INFORMAR_JA_PAGUEI') {
+      if (nlu.paymentMethod === 'pix' || nlu.paymentMethod === 'boleto') {
+        await chatStateService.setFlowState(contactId, 'WAITING_RECEIPT', {
+          ...flow,
+          bloqueioMetodo: nlu.paymentMethod,
+          fallbackCount: 0,
+        });
+        await this.reply(contactId, msg.buildAguardandoComprovanteText(nlu.paymentMethod));
+        return;
+      }
+      await chatStateService.setFlowState(contactId, 'BLOQUEIO_METODO', { ...flow, fallbackCount: 0 });
       await this.reply(contactId, msg.buildBloqueioMetodoText());
       return;
     }
-    if (choice === '3') {
-      await chatStateService.setFlowState(contactId, 'MAIN_MENU', flow);
+    if (nlu.intent === 'BACK_TO_MENU') {
+      await chatStateService.setFlowState(contactId, 'MAIN_MENU', { ...flow, fallbackCount: 0 });
       await this.reply(contactId, msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' }));
       return;
     }
-    await this.reply(contactId, msg.buildInvalidMenuChoiceText(msg.buildBloqueioMenuText()));
+    if (nlu.intent === 'FALAR_COM_ATENDENTE') {
+      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', { ...flow, fallbackCount: 0 });
+      await this.reply(contactId, msg.buildHumanTopicText());
+      return;
+    }
+    await this.handleStageFallback(contactId, 'BLOQUEIO_MENU', flow, msg.buildBloqueioMenuText(), text);
   }
 
   // ─── Estágio: BLOQUEIO_METODO ("como pagou? 1-Pix / 2-Boleto") ─────────────
 
-  private async handleBloqueioMetodo(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleBloqueioMetodo(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice !== '1' && choice !== '2') {
-      await this.reply(contactId, msg.buildInvalidMenuChoiceText(opts('Pix', 'Código de barras')));
+    if (nlu.intent === 'PAYMENT_METHOD_PIX' || nlu.intent === 'PAYMENT_METHOD_BOLETO') {
+      const metodo: 'pix' | 'boleto' = nlu.intent === 'PAYMENT_METHOD_PIX' ? 'pix' : 'boleto';
+      await chatStateService.setFlowState(contactId, 'WAITING_RECEIPT', {
+        ...flow,
+        bloqueioMetodo: metodo,
+        fallbackCount: 0,
+      });
+      await this.reply(contactId, msg.buildAguardandoComprovanteText(metodo));
       return;
     }
-    const metodo: 'pix' | 'boleto' = choice === '1' ? 'pix' : 'boleto';
-    await chatStateService.setFlowState(contactId, 'WAITING_RECEIPT', { ...flow, bloqueioMetodo: metodo });
-    await this.reply(contactId, msg.buildAguardandoComprovanteText(metodo));
+    if (nlu.intent === 'BACK_TO_MENU') {
+      await chatStateService.setFlowState(contactId, 'MAIN_MENU', { ...flow, fallbackCount: 0 });
+      await this.reply(contactId, msg.buildMainMenuText(flow.client ?? { nome: '', cpf: '', imei: '', loja: '', contrato: '' }));
+      return;
+    }
+    if (nlu.intent === 'FALAR_COM_ATENDENTE') {
+      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', { ...flow, fallbackCount: 0 });
+      await this.reply(contactId, msg.buildHumanTopicText());
+      return;
+    }
+    await this.handleStageFallback(
+      contactId,
+      'BLOQUEIO_METODO',
+      flow,
+      opts('Pix', 'Código de barras'),
+      text
+    );
   }
 
   // ─── Estágio: WAITING_RECEIPT (espera a foto/PDF do comprovante) ──────────
@@ -582,10 +898,14 @@ export class AthinaFlowService {
     await this.reply(contactId, msg.buildHumanTopicConfirmText(topic));
   }
 
-  private async handleHumanTopicConfirm(contactId: string, text: string, state: ChatState): Promise<void> {
-    const choice = text.trim();
+  private async handleHumanTopicConfirm(
+    contactId: string,
+    text: string,
+    state: ChatState,
+    nlu: NluDecision
+  ): Promise<void> {
     const flow = state.flow ?? {};
-    if (choice === '1') {
+    if (nlu.intent === 'CONFIRM_YES') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('falar com nosso especialista'));
       await this.handoffToHumans({
         contactId,
@@ -596,12 +916,46 @@ export class AthinaFlowService {
       await chatStateService.resetFlowState(contactId);
       return;
     }
-    if (choice === '2') {
-      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', flow);
+    if (nlu.intent === 'CONFIRM_NO') {
+      await chatStateService.setFlowState(contactId, 'HUMAN_TOPIC', { ...flow, fallbackCount: 0 });
       await this.reply(contactId, msg.buildHumanTopicText());
       return;
     }
-    await this.reply(contactId, msg.buildInvalidMenuChoiceText(opts('Sim, seguir com o atendimento', 'Não, quero digitar de novo')));
+    await this.handleStageFallback(
+      contactId,
+      'HUMAN_TOPIC_CONFIRM',
+      flow,
+      opts('Sim, seguir com o atendimento', 'Não, quero digitar de novo'),
+      text
+    );
+  }
+
+  /**
+   * Tratamento de fallback progressivo:
+   * - Tentativas 1 e 2: reapresenta as opções da etapa atual.
+   * - Tentativa 3 (MAX_FALLBACK_STRIKES): transfere automaticamente para atendente humano.
+   */
+  private async handleStageFallback(
+    contactId: string,
+    stage: ChatStage,
+    flow: ChatFlowData,
+    menuText: string,
+    userText: string
+  ): Promise<void> {
+    const strikes = (flow.fallbackCount ?? 0) + 1;
+    if (strikes >= MAX_FALLBACK_STRIKES) {
+      await this.reply(contactId, msg.buildTransferToSpecialistText('concluir o seu atendimento'));
+      await this.handoffToHumans({
+        contactId,
+        client: this.clientForHandoff(flow),
+        reason: 'Dificuldade de compreensão no autoatendimento (fallback)',
+        details: `Cliente enviou ${strikes} respostas não reconhecidas na etapa ${stage}. Última mensagem: "${userText.slice(0, 300)}"`,
+      });
+      await chatStateService.resetFlowState(contactId);
+      return;
+    }
+    await chatStateService.setFlowState(contactId, stage, { ...flow, fallbackCount: strikes });
+    await this.reply(contactId, msg.buildInvalidMenuChoiceText(menuText));
   }
 
   // ─── Helpers compartilhados ─────────────────────────────────────────────────
@@ -647,7 +1001,11 @@ export class AthinaFlowService {
     }
   }
 
-  private async defaultConsultarPaymobi(query: string, clientName?: string): Promise<PaymobiResult> {
+  private async defaultConsultarPaymobi(
+    query: string,
+    clientName?: string,
+    options?: { skipPix?: boolean }
+  ): Promise<PaymobiResult> {
     const email = config.paymobiEmail;
     const password = config.paymobiPassword;
     if (!email || !password) {
@@ -658,6 +1016,7 @@ export class AthinaFlowService {
       query,
       clientName,
       searchType: query.length === 15 ? 'imei' : query.length === 14 ? 'cnpj' : 'cpf',
+      skipPix: options?.skipPix,
     });
   }
 

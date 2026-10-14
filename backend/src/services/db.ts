@@ -51,6 +51,28 @@ const SCHEMA = `
     intent TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 0
   );
+  CREATE VIRTUAL TABLE IF NOT EXISTS training_qas_fts USING fts5(
+    intent,
+    question,
+    answer,
+    content='training_qas',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+  );
+  CREATE TRIGGER IF NOT EXISTS training_qas_ai AFTER INSERT ON training_qas BEGIN
+    INSERT INTO training_qas_fts(rowid, intent, question, answer)
+    VALUES (new.id, new.intent, new.question, new.answer);
+  END;
+  CREATE TRIGGER IF NOT EXISTS training_qas_ad AFTER DELETE ON training_qas BEGIN
+    INSERT INTO training_qas_fts(training_qas_fts, rowid, intent, question, answer)
+    VALUES ('delete', old.id, old.intent, old.question, old.answer);
+  END;
+  CREATE TRIGGER IF NOT EXISTS training_qas_au AFTER UPDATE ON training_qas BEGIN
+    INSERT INTO training_qas_fts(training_qas_fts, rowid, intent, question, answer)
+    VALUES ('delete', old.id, old.intent, old.question, old.answer);
+    INSERT INTO training_qas_fts(rowid, intent, question, answer)
+    VALUES (new.id, new.intent, new.question, new.answer);
+  END;
 `;
 
 export function openDatabase(dbPath: string = process.env.ATHINA_DB_PATH || DEFAULT_DB_PATH): DatabaseSync {
@@ -60,6 +82,14 @@ export function openDatabase(dbPath: string = process.env.ATHINA_DB_PATH || DEFA
   db.exec('PRAGMA busy_timeout = 3000;');
   db.exec(SCHEMA);
   migrateLegacyJsonOnce(db);
+  if (!getMeta(db, 'fts5_rebuilt')) {
+    try {
+      db.exec("INSERT INTO training_qas_fts(training_qas_fts) VALUES('rebuild');");
+      setMeta(db, 'fts5_rebuilt', new Date().toISOString());
+    } catch {
+      /* FTS5 indisponível no build do SQLite — degradar graciosamente */
+    }
+  }
   return db;
 }
 

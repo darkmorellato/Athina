@@ -57,6 +57,10 @@ const envSchema = z.object({
   TTS_SERVER_URL: z.string().url().default('http://127.0.0.1:5050'),
   // Reverse proxy hops para o rate limit por IP (0 = exposição direta)
   TRUST_PROXY: z.coerce.number().min(0).max(10).default(0),
+  // Modelo opcional de Speech-to-Text (OpenAI-compatible /audio/transcriptions) para notas de voz
+  STT_MODEL: z.string().optional(),
+  // Segredo HMAC opcional para o webhook de confirmação proativa de pagamento (/webhooks/payment)
+  PAYMENT_WEBHOOK_SECRET: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -101,6 +105,8 @@ const configObj = {
     .filter((s) => s.length >= 10),
   ttsServerUrl: env.TTS_SERVER_URL,
   trustProxy: env.TRUST_PROXY,
+  sttModel: env.STT_MODEL ?? null,
+  paymentWebhookSecret: env.PAYMENT_WEBHOOK_SECRET ?? null,
 } as const;
 
 export default configObj;

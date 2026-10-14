@@ -5,7 +5,7 @@
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
 import axios from 'axios';
-import { Mutex } from 'async-mutex';
+import { Mutex, Semaphore } from 'async-mutex';
 import logger from '../utils/logger.js';
 import { processPixPayment } from './helpers/paymobiPixProcessor.js';
 import { searchContracts } from './helpers/paymobiApiHelper.js';
@@ -23,6 +23,66 @@ interface PaymobiInstallment {
 // Security fix: Shared browser instance with mutex to prevent race conditions
 let sharedBrowser: Browser | null = null;
 const browserMutex = new Mutex();
+/** Limita a 3 abas simultâneas de extração PIX no Chromium para evitar exaustão de RAM sob carga. */
+const pixPageSemaphore = new Semaphore(3);
+
+/** Cache em memória do Bearer token do Paymobi (evita re-login a cada consulta). */
+let cachedAuthToken: { email: string; token: string; expiresAt: number } | null = null;
+const tokenMutex = new Mutex();
+const TOKEN_TTL_MS = 45 * 60 * 1000;
+
+export function clearPaymobiTokenCache(): void {
+  cachedAuthToken = null;
+}
+
+async function getPaymobiToken(email: string, password: string, forceRefresh = false): Promise<string> {
+  return tokenMutex.runExclusive(async () => {
+    if (
+      !forceRefresh &&
+      cachedAuthToken &&
+      cachedAuthToken.email === email &&
+      cachedAuthToken.expiresAt > Date.now()
+    ) {
+      return cachedAuthToken.token;
+    }
+    const authBasic = Buffer.from(`${email}:${password}`).toString('base64');
+    const loginResponse = await axios.get('https://paymobi-fin-api.azurewebsites.net/users/auth', {
+      headers: {
+        Authorization: `Basic ${authBasic}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    });
+    const token = loginResponse.data?.result?.token;
+    if (!token) {
+      throw new Error('Falha ao autenticar na API do Paymobi (Token não retornado)');
+    }
+    cachedAuthToken = {
+      email,
+      token,
+      expiresAt: Date.now() + TOKEN_TTL_MS,
+    };
+    return token;
+  });
+}
+
+/** Extrai o PIX de um link de boleto respeitando o semáforo de concorrência (máx. 3 abas). */
+export async function extractPixBounded(
+  boletoLink: string
+): Promise<{ pixCode: string; pixUrl: string; qrCodePath: string }> {
+  if (!boletoLink) return { pixCode: '', pixUrl: '', qrCodePath: '' };
+  const [, release] = await pixPageSemaphore.acquire();
+  try {
+    const browser = await getSharedBrowser();
+    return await processPixPayment(browser, boletoLink);
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    logger.warn({ error: errMsg }, 'Failed to process PIX payment from boletoLink');
+    return { pixCode: '', pixUrl: '', qrCodePath: '' };
+  } finally {
+    release();
+  }
+}
 
 async function getSharedBrowser(): Promise<Browser> {
   return await browserMutex.runExclusive(async () => {
@@ -94,30 +154,20 @@ export class PaymobiScraperService {
     query: string;
     clientName?: string;
     searchType?: string;
+    /** Quando true, pula a abertura do Chromium no lookup inicial e deixa a extração do PIX sob demanda. */
+    skipPix?: boolean;
   }): Promise<PaymobiResult> {
     // Security fix: Mask sensitive data (CPF/IMEI) in logs for LGPD compliance
     const maskedQuery = this.maskSensitiveData(params.query);
-    logger.info({ query: maskedQuery, searchType: params.searchType }, '[PaymobiScraperService] Starting API-based query');
+    logger.info({ query: maskedQuery, searchType: params.searchType, skipPix: Boolean(params.skipPix) }, '[PaymobiScraperService] Starting API-based query');
 
     if (!this.email || !this.password) {
       return { success: false, message: 'Credenciais do Paymobi não configuradas no servidor.' };
     }
 
     try {
-      // 1. Authenticate with Paymobi API using Basic Auth to obtain Session Token
-      const authBasic = Buffer.from(`${this.email}:${this.password}`).toString('base64');
-      const loginResponse = await axios.get('https://paymobi-fin-api.azurewebsites.net/users/auth', {
-        headers: {
-          'Authorization': `Basic ${authBasic}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      });
-
-      const token = loginResponse.data?.result?.token;
-      if (!token) {
-        throw new Error('Falha ao autenticar na API do Paymobi (Token não retornado)');
-      }
+      // 1. Authenticate with Paymobi API (cached Bearer token, refresh on 401)
+      let token = await getPaymobiToken(this.email, this.password);
 
       // 2. Search for the contract using the Token
       const cleanQuery = params.query.replace(/\D/g, ''); // strip non-numeric for cpf/imei
@@ -125,7 +175,17 @@ export class PaymobiScraperService {
       const isCpf = cleanQuery.length === 11;
       const isCnpj = cleanQuery.length === 14;
 
-      const contracts = await searchContracts(token, params.query, params.clientName);
+      let contracts: PaymobiContract[];
+      try {
+        contracts = await searchContracts(token, params.query, params.clientName);
+      } catch (searchErr) {
+        if (axios.isAxiosError(searchErr) && searchErr.response?.status === 401) {
+          token = await getPaymobiToken(this.email, this.password, true);
+          contracts = await searchContracts(token, params.query, params.clientName);
+        } else {
+          throw searchErr;
+        }
+      }
 
       if (!contracts || !Array.isArray(contracts) || contracts.length === 0) {
         return { success: false, reason: 'NOT_FOUND', message: NOT_FOUND_MSG };
@@ -232,21 +292,11 @@ export class PaymobiScraperService {
         };
       }
 
-      // 5. Process PIX code using shared browser instance (avoids launching new browser per request)
+      // 5. Process PIX code using bounded semaphore (unless skipPix is requested for fast initial lookup)
       let pix = { pixCode: '', pixUrl: '', qrCodePath: '' };
-      if (openInstallment.boletoLink) {
+      if (openInstallment.boletoLink && !params.skipPix) {
         logger.info('[PaymobiScraperService] Processing PIX for open installment');
-        try {
-          const browser = await getSharedBrowser();
-          pix = await processPixPayment(browser, openInstallment.boletoLink);
-        } catch (e) {
-          const errMsg = e instanceof Error ? e.message : String(e);
-          // NÃO fechar o browser compartilhado aqui: consultas concorrentes usam
-          // o mesmo Chromium — fechar derrubava as páginas delas. A page do PIX
-          // fecha em processPixPayment; browser morto é recriado por
-          // getSharedBrowser (checa isConnected).
-          logger.warn({ error: errMsg }, 'Failed to process PIX payment from boletoLink');
-        }
+        pix = await extractPixBounded(openInstallment.boletoLink);
       }
 
       const isAtrasado = new Date(openInstallment.dueDate) < new Date();

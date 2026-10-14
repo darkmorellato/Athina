@@ -18,6 +18,11 @@ import config from '../src/config/index.js';
 import type { PaymobiResult } from '../src/types/index.js';
 import { analyzeReceiptText, combineAnalyses } from '../src/services/helpers/receiptAnalysisHelper.js';
 import { describeReceiptForOperator } from '../src/services/AthinaFlowService.js';
+import {
+  verifyWebhookSignature,
+  processPaymentWebhook,
+  signWebhookPayload,
+} from '../src/services/helpers/paymentWebhookHelper.js';
 
 const mutableConfig = config as unknown as { agentAutoReply: boolean };
 const originalAutoReply = mutableConfig.agentAutoReply;
@@ -418,13 +423,238 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    name: 'takeover humano: operador respondeu → bot fica em silêncio',
+    name: 'takeover humano: operador respondeu → bot fica em silêncio (persiste no SQLite e permite liberar)',
     run: async () => {
       const { flow, sent } = makeFlow();
       const contact = newContact();
       flow.noteHumanReply(contact);
       await flow.handleIncomingMessage({ from: contact, body: 'oi', id: 'i1' });
       assert.equal(sent.length, 0);
+
+      // Nova instância (simula restart do processo Node): takeover deve continuar ativo via SQLite
+      const secondInstance = makeFlow();
+      await secondInstance.flow.handleIncomingMessage({ from: contact, body: 'oi de novo', id: 'i2' });
+      assert.equal(secondInstance.sent.length, 0, 'takeover deve sobreviver entre instâncias via SQLite');
+
+      // Operador devolve a conversa para a Athina
+      secondInstance.flow.releaseHumanTakeover(contact);
+      await secondInstance.flow.handleIncomingMessage({ from: contact, body: 'oi', id: 'i3' });
+      assert.equal(secondInstance.sent.length, 1, 'após liberar takeover, a Athina volta a responder');
+    },
+  },
+  {
+    name: 'validação de documento: rejeita dígitos repetidos e telefones, mas aceita CNPJ de 14 dígitos',
+    run: async () => {
+      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'v1' });
+      await flow.handleIncomingMessage({ from: contact, body: '00000000000', id: 'v2' });
+      assert.equal(consulted.length, 0, 'CPF com dígitos repetidos não deve consultar Paymobi');
+      assert.ok(sent.some((m) => /CPF.*IMEI/i.test(m.text)));
+
+      await flow.handleIncomingMessage({ from: contact, body: '(11) 98765-4321', id: 'v3' });
+      assert.equal(consulted.length, 0, 'telefone formatado não deve ser confundido com CPF');
+
+      await flow.handleIncomingMessage({ from: contact, body: '11.222.333/0001-81', id: 'v4' });
+      assert.equal(consulted.length, 1, 'CNPJ válido de 14 dígitos deve consultar o Paymobi');
+      assert.equal(consulted[0].query, '11222333000181');
+    },
+  },
+  {
+    name: 'performance P1: reutiliza contrato recém-consultado (<5min) no menu e extrai PIX sob demanda apenas na opção 1',
+    run: async () => {
+      let clock = new Date('2026-10-12T13:00:00Z');
+      const pixResolvedLinks: string[] = [];
+      const { flow, sent, consulted } = makeFlow({
+        consultarPaymobi: async () => ({
+          success: true,
+          message: 'ok',
+          data: {
+            client: client(),
+            statusContrato: 'atraso',
+            overdueCount: 1,
+            installments: INSTALLMENTS,
+            // No lookup rápido (skipPix), parcela vem sem pixCode
+            parcela: { ...PARCELA, pixCode: '', pixUrl: '' },
+          },
+        }),
+        now: clock,
+      });
+      (flow as unknown as {
+        deps: {
+          now: () => Date;
+          resolvePix: (url: string) => Promise<{ pixCode: string; pixUrl: string; qrCodePath: string }>;
+        };
+      }).deps.now = () => clock;
+      (flow as unknown as {
+        deps: {
+          resolvePix: (url: string) => Promise<{ pixCode: string; pixUrl: string; qrCodePath: string }>;
+        };
+      }).deps.resolvePix = async (url: string) => {
+        pixResolvedLinks.push(url);
+        return {
+          pixCode: PARCELA.pixCode,
+          pixUrl: PARCELA.pixUrl,
+          qrCodePath: '',
+        };
+      };
+
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'p1-1' });
+      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'p1-2' });
+      assert.equal(consulted.length, 1, 'lookup inicial faz 1 consulta na API');
+      assert.equal(pixResolvedLinks.length, 0, 'lookup inicial NÃO deve abrir Playwright para extrair PIX');
+
+      // Cliente escolhe 2 (Verificar Saldo): deve reutilizar cache sem nova consulta e sem extrair PIX
+      await flow.handleIncomingMessage({ from: contact, body: '2', id: 'p1-3' });
+      assert.equal(consulted.length, 1, 'Verificar Saldo dentro de 5 min deve reutilizar o contrato em cache');
+      assert.equal(pixResolvedLinks.length, 0, 'Verificar Saldo não precisa extrair PIX');
+
+      // Volta ao menu ("1" em SALDO_FOLLOWUP) e escolhe "1" (Pagar Boleto)
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: 'p1-4' });
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: 'p1-5' });
+      assert.equal(consulted.length, 1, 'Pagar Boleto dentro de 5 min reutiliza o contrato');
+      assert.equal(pixResolvedLinks.length, 1, 'Pagar Boleto extrai o PIX sob demanda');
+
+      // Confirma o boleto ("1") e recebe o PIX extraído sob demanda
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: 'p1-6' });
+      assert.ok(sent.some((m) => m.text.includes(PARCELA.pixCode)), 'deve entregar o pixCode resolvido sob demanda');
+    },
+  },
+  {
+    name: 'motor conversacional P2: Slot Jumping — cliente informa nome, CPF e intenção de pagar boleto na mesma mensagem e pula o menu principal',
+    run: async () => {
+      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundUmAtraso() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({
+        from: contact,
+        body: 'Oi, meu nome é Maria Silva, meu CPF é 12345678901 e quero pagar meu boleto',
+        id: 'nlu-1',
+      });
+      assert.equal(consulted.length, 1);
+      assert.ok(
+        sent.some((m) => /boleto em atraso/i.test(m.text) && /corretos/i.test(m.text)),
+        'deve pular o menu principal e já exibir a confirmação do boleto em atraso'
+      );
+
+      // Confirma em linguagem natural ("sim, pode mandar") em vez de digitar "1"
+      await flow.handleIncomingMessage({
+        from: contact,
+        body: 'sim, pode mandar por favor',
+        id: 'nlu-2',
+      });
+      assert.ok(sent.some((m) => m.text.includes(PARCELA.pixCode)), 'deve aceitar confirmação em linguagem natural e enviar o PIX');
+    },
+  },
+  {
+    name: 'motor conversacional P2: navegação em linguagem natural no menu e atalho de "já paguei no pix"',
+    run: async () => {
+      const { flow, sent } = makeFlow({ consultarPaymobi: async () => foundUmAtraso() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'nlu-3' });
+      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'nlu-4' });
+      // No MAIN_MENU, em vez de "3" → "2" → "1", o cliente diz direto que o celular bloqueou mas já pagou via PIX
+      await flow.handleIncomingMessage({
+        from: contact,
+        body: 'meu celular está bloqueado mas eu já paguei no pix hoje',
+        id: 'nlu-5',
+      });
+      assert.ok(
+        sent.some((m) => /encaminhe o comprovante/i.test(m.text)),
+        'deve avançar direto para o envio do comprovante PIX sem exigir 3 menus numerados'
+      );
+    },
+  },
+  {
+    name: 'motor conversacional P2: 3 fallbacks consecutivos ou mensagem hostil transferem automaticamente para humano',
+    run: async () => {
+      const { flow, notified } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
+      const contact = newContact();
+      await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'fb-1' });
+      await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'fb-2' });
+
+      // 3 respostas incompreensíveis no MAIN_MENU
+      await flow.handleIncomingMessage({ from: contact, body: 'xyz123', id: 'fb-3' });
+      assert.equal(notified.length, 0);
+      await flow.handleIncomingMessage({ from: contact, body: 'blablabla', id: 'fb-4' });
+      assert.equal(notified.length, 0);
+      await flow.handleIncomingMessage({ from: contact, body: 'nao sei o que escolher kkk', id: 'fb-5' });
+      assert.equal(notified.length, 1, 'na 3ª tentativa sem compreensão deve escalar para humano');
+      assert.match(notified[0].reason, /fallback|compreens/i);
+    },
+  },
+  {
+    name: 'motor conversacional P2: debounce agrupa mensagens picadas enviadas em sequência rápida',
+    run: async () => {
+      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
+      (flow as unknown as { deps: { debounceMs: () => number } }).deps.debounceMs = () => 40;
+      const contact = newContact();
+
+      // Cliente manda nome e CPF em duas mensagens separadas por 5ms
+      const p1 = flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'db-1' });
+      const p2 = flow.handleIncomingMessage({ from: contact, body: '12345678901', id: 'db-2' });
+      await Promise.all([p1, p2]);
+
+      assert.equal(consulted.length, 1, 'as duas mensagens agrupadas já completam nome + CPF e consultam o Paymobi de uma vez');
+      assert.ok(
+        !sent.some((m) => /informe o seu \*CPF\*/i.test(m.text)),
+        'não deve pedir o CPF separadamente pois ele já veio na segunda mensagem agrupada'
+      );
+    },
+  },
+  {
+    name: 'automação P3: nota de voz (áudio/ptt) enviada pelo cliente é transcrita (STT) e processada no fluxo conversacional',
+    run: async () => {
+      const { flow, sent, consulted } = makeFlow({ consultarPaymobi: async () => foundEmDia() });
+      (flow as unknown as {
+        deps: { transcribeAudio: (m: { mimetype: string }) => Promise<string | null> };
+      }).deps.transcribeAudio = async (m) => {
+        if (m.mimetype.startsWith('audio/')) {
+          return 'Oi meu nome é Maria Silva e meu CPF é 12345678901';
+        }
+        return null;
+      };
+
+      const contact = newContact();
+      await flow.handleIncomingMessage({
+        from: contact,
+        body: '',
+        hasMedia: true,
+        id: 'stt-1',
+        downloadMedia: async () => ({ data: 'ZmFrZUF1ZGlv', mimetype: 'audio/ogg; codecs=opus' }),
+      });
+
+      assert.equal(consulted.length, 1, 'áudio transcrito com nome + CPF deve consultar o Paymobi automaticamente');
+      assert.ok(sent.some((m) => /Como podemos lhe ajudar/i.test(m.text)), 'deve apresentar o menu após processar o áudio');
+    },
+  },
+  {
+    name: 'automação P3: webhook de confirmação de pagamento valida assinatura HMAC e notifica desbloqueio proativamente',
+    run: async () => {
+      const secret = 'segredo-webhook-teste';
+      const rawBody = JSON.stringify({
+        phone: '5511988887777',
+        customerName: 'Maria Silva',
+        installmentNumber: 4,
+        value: 'R$ 405,63',
+        status: 'paid',
+      });
+      const validSig = signWebhookPayload(rawBody, secret);
+
+      assert.equal(verifyWebhookSignature(rawBody, validSig, secret), true);
+      assert.equal(verifyWebhookSignature(rawBody, 'assinatura-invalida', secret), false);
+
+      const sentWebhook: SentMessage[] = [];
+      const res = await processPaymentWebhook(JSON.parse(rawBody), {
+        sendMessage: async (to, text) => {
+          sentWebhook.push({ to, text });
+        },
+      });
+
+      assert.equal(res.notified, true);
+      assert.equal(sentWebhook.length, 1);
+      assert.equal(sentWebhook[0].to, '5511988887777@c.us');
+      assert.match(sentWebhook[0].text, /pagamento.*confirmado|recebemos/i);
     },
   },
   {

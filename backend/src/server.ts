@@ -15,6 +15,7 @@ import chatStateService from './services/ChatStateService.js';
 import { closeSharedBrowser } from './services/PaymobiScraperService.js';
 import SocketController from './controllers/SocketController.js';
 import athinaFlowService from './services/AthinaFlowService.js';
+import { verifyWebhookSignature, processPaymentWebhook } from './services/helpers/paymentWebhookHelper.js';
 import type { ClientToServerEvents, ServerToClientEvents } from '@shared/contracts.js';
 import logger from './utils/logger.js';
 import { initLlmTracing } from './services/llmTracer.js';
@@ -42,7 +43,30 @@ if (config.trustProxy > 0) {
   app.set('trust proxy', config.trustProxy);
 }
 
-app.use(cors());
+const allowedOrigin = config.isDev
+  ? '*'
+  : config.allowedOrigin || false;
+
+if (!allowedOrigin && !config.isDev) {
+  logger.warn('⚠️  ALLOWED_ORIGIN not set in production — CORS will deny all cross-origin requests.');
+}
+
+// Security headers (nosniff, frame protection, referrer policy)
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+app.use(
+  cors({
+    origin: allowedOrigin || false,
+    methods: ['GET', 'POST'],
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '1mb' }));
 
 // Security fix: Global HTTP rate limiting (skip Socket.IO transport to avoid breaking realtime)
@@ -57,14 +81,6 @@ const httpRateLimiter = rateLimit({
 app.use(httpRateLimiter);
 
 const server = http.createServer(app);
-
-const allowedOrigin = config.isDev
-  ? '*'
-  : config.allowedOrigin || false;
-
-if (!allowedOrigin && !config.isDev) {
-  logger.warn('⚠️  ALLOWED_ORIGIN not set in production — CORS will deny all cross-origin requests.');
-}
 
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
   cors: {
@@ -181,6 +197,28 @@ app.get('/health', async (_req, res) => {
   }
 
   res.status(health.status === 'ok' ? 200 : 503).json(health);
+});
+
+// Webhook de confirmação proativa de pagamento (Cel.cash / Paymobi)
+app.post('/webhooks/payment', async (req, res) => {
+  const secret = config.paymentWebhookSecret;
+  if (!secret) {
+    res.status(503).json({ error: 'Payment webhook is not configured on this server.' });
+    return;
+  }
+  const signature = req.header('x-webhook-signature') ?? undefined;
+  const rawBody = JSON.stringify(req.body ?? {});
+  if (!verifyWebhookSignature(rawBody, signature, secret)) {
+    logger.warn('Rejected payment webhook with invalid HMAC signature');
+    res.status(401).json({ error: 'Invalid webhook signature' });
+    return;
+  }
+  try {
+    const result = await processPaymentWebhook(req.body);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid payload' });
+  }
 });
 
 const PORT = config.port;

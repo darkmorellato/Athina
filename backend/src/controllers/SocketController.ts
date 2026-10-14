@@ -2,6 +2,7 @@
  * @fileoverview Socket.IO event handler registration with auth, rate limiting,
  * server-side chat state management, and analytics tracking.
  */
+import crypto from 'crypto';
 import pkg from 'whatsapp-web.js';
 const { MessageMedia } = pkg;
 
@@ -278,6 +279,17 @@ class SocketController {
       }
     });
 
+    socket.on('release-human-takeover', (data: unknown) => {
+      const parsed = contactIdSchema.safeParse(data);
+      if (!parsed.success) {
+        logger.warn({ socketId: socket.id }, 'Invalid release-human-takeover payload rejected');
+        return;
+      }
+      athinaFlowService.releaseHumanTakeover(parsed.data.contactId);
+      this.io.emit('human-takeover-released', { contactId: parsed.data.contactId });
+      logger.info({ contactId: parsed.data.contactId, socketId: socket.id }, 'Human takeover released by operator');
+    });
+
     // ─── Marcar conversa como LIDA no WhatsApp (ticks azuis no cliente) ────
     // Handler pronto porém DORMENTE: o painel só o aciona quando
     // MARK_READ_ON_OPEN estiver ligado no frontend (useSocket.ts), porque
@@ -525,8 +537,10 @@ class SocketController {
       return;
     }
 
-    const token = socket.handshake.auth?.token;
-    if (token !== config.adminSecret) {
+    const token = String(socket.handshake.auth?.token ?? '');
+    const a = Buffer.from(token);
+    const b = Buffer.from(config.adminSecret);
+    if (a.length === 0 || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       logger.warn({ socketId: socket.id }, '[SocketController] Unauthorized restart attempt');
       safeEmit(socket, 'paymobi-error', { message: 'Unauthorized.' });
       return;
