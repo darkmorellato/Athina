@@ -836,6 +836,73 @@ const scenarios: Scenario[] = [
     },
   },
   {
+    name: 'P3: dispose() drena os buffers de debounce pendentes no shutdown (nenhuma mensagem perdida)',
+    run: async () => {
+      const { flow, consulted } = makeFlow({
+        consultarPaymobi: async () => foundEmDia(),
+        debounceMs: () => 5000, // janela longa: nada flusha sozinho antes do dispose
+      });
+      const contact = newContact();
+      void flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: 'dp-1' });
+      void flow.handleIncomingMessage({ from: contact, body: '52998224725', id: 'dp-2' });
+
+      await flow.dispose();
+      assert.equal(consulted.length, 1, 'dispose deve processar as mensagens em buffer antes de encerrar');
+    },
+  },
+  {
+    name: 'P3: webhook normaliza número de 10 dígitos com DDD 55 (RS) adicionando o DDI 55',
+    run: async () => {
+      const secret = 's';
+      const rawBody = '{"phone":"5533334444","status":"paid"}';
+      const sig = signWebhookPayload(rawBody, secret);
+      const sentWebhook: SentMessage[] = [];
+      const res = await handleWebhookRequest(
+        { rawBody, body: JSON.parse(rawBody), signatureHeader: sig, secret },
+        { sendMessage: async (to, text) => { sentWebhook.push({ to, text }); } }
+      );
+      assert.equal(res.notified, true);
+      assert.equal(sentWebhook[0].to, '555533334444@c.us', '10 dígitos sem DDI devem receber o prefixo 55 mesmo com DDD 55');
+    },
+  },
+  {
+    name: 'P3: webhook só contabiliza autoResolved quando o envio ao cliente realmente ocorre',
+    run: async () => {
+      const secret = 's';
+      const rawBody = '{"phone":"5511988887777","status":"paid"}';
+      const sig = signWebhookPayload(rawBody, secret);
+      let increments = 0;
+      const res = await handleWebhookRequest(
+        { rawBody, body: JSON.parse(rawBody), signatureHeader: sig, secret },
+        {
+          sendMessage: async () => {
+            throw new Error('whatsapp offline');
+          },
+          incrementAutoResolved: async () => {
+            increments += 1;
+          },
+        }
+      );
+      assert.equal(res.notified, false);
+      assert.equal(increments, 0, 'não deve contar resolução automática quando o envio falha');
+
+      const rawBody2 = '{"phone":"5511988887777","status":"paid","installmentNumber":4}';
+      const sig2 = signWebhookPayload(rawBody2, secret);
+      let increments2 = 0;
+      const ok = await handleWebhookRequest(
+        { rawBody: rawBody2, body: JSON.parse(rawBody2), signatureHeader: sig2, secret },
+        {
+          sendMessage: async () => {},
+          incrementAutoResolved: async () => {
+            increments2 += 1;
+          },
+        }
+      );
+      assert.equal(ok.notified, true);
+      assert.equal(increments2, 1, 'deve contar resolução automática quando o envio é bem-sucedido');
+    },
+  },
+  {
     name: 'dedupe: a mesma mensagem (mesmo id) só é processada uma vez',
     run: async () => {
       const { flow, sent } = makeFlow();

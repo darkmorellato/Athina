@@ -4,6 +4,7 @@
  */
 import { getDb } from './db.js';
 import logger from '../utils/logger.js';
+import type { ChatFlowData as SharedChatFlowData } from '@shared/contracts.js';
 
 export type ChatStage =
   | 'COLLECTING'
@@ -50,27 +51,11 @@ export interface ChatInstallmentSummary {
  * Dados do roteiro determinístico (AthinaFlowService) que precisam sobreviver
  * entre mensagens: cadastro localizado, parcela em confirmação, método de
  * pagamento informado no fluxo de bloqueio e assunto digitado para o atendente.
+ *
+ * Fonte única: definido em `shared/contracts.ts` (evita drift painel ↔ backend).
  */
-export interface ChatFlowData {
-  client?: ChatClientData;
-  statusContrato?: 'em_dia' | 'atraso';
-  /** Quantidade de parcelas em atraso (0 = em dia, 1 = amarelo, 2+ = vermelho). */
-  overdueCount?: number;
-  parcela?: ChatParcelaData;
-  installments?: ChatInstallmentSummary[];
-  bloqueioMetodo?: 'pix' | 'boleto';
-  humanTopic?: string;
-  /** Intenção capturada antes da identificação terminar (Slot Jumping). */
-  deferredIntent?: 'PAGAR_BOLETO' | 'VERIFICAR_SALDO' | 'CELULAR_BLOQUEADO' | 'INFORMAR_JA_PAGUEI' | 'FALAR_COM_ATENDENTE';
-  /** Contador de fallbacks consecutivos no estágio atual. */
-  fallbackCount?: number;
-  /** Histórico curto da conversa para contexto NLU. */
-  recentTurns?: Array<{ role: 'user' | 'assistant'; content: string; at: number }>;
-  /** Timestamp (ms) de quando os dados do contrato no Paymobi foram consultados. */
-  contractFetchedAt?: number;
-  /** Timestamp (ms) até quando o atendente humano assumiu a conversa (null = liberação explícita). */
-  humanTakeoverUntil?: number | null;
-}
+export type ChatFlowData = SharedChatFlowData;
+export type { SharedChatFlowData };
 
 export interface ChatState {
   stage: ChatStage;

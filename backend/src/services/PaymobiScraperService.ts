@@ -180,6 +180,8 @@ export class PaymobiScraperService {
         contracts = await searchContracts(token, params.query, params.clientName);
       } catch (searchErr) {
         if (axios.isAxiosError(searchErr) && searchErr.response?.status === 401) {
+          // Tokens cacheados podem ser invalidados antes do TTL: descarta e renova.
+          clearPaymobiTokenCache();
           token = await getPaymobiToken(this.email, this.password, true);
           contracts = await searchContracts(token, params.query, params.clientName);
         } else {

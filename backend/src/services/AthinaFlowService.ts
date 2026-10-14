@@ -259,6 +259,14 @@ export class AthinaFlowService {
     return this.enqueueMessage(from, text, raw);
   }
 
+  /** Remove valores temporários e drena buffers de debounce no shutdown (não perder mensagens). */
+  async dispose(): Promise<void> {
+    for (const from of Array.from(this.debounceBuffers.keys())) {
+      this.flushDebounce(from);
+    }
+    await Promise.allSettled(Array.from(this.pending.values()));
+  }
+
   private flushDebounce(from: string): void {
     const entry = this.debounceBuffers.get(from);
     if (!entry) return;

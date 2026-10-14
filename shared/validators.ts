@@ -191,6 +191,9 @@ const NON_NAME_WORDS = new Set([
   'olá',
 ]);
 
+/** Vogais (inclui acentuadas) — uma palavra sem nenhuma vogal não é nome próprio. */
+const VOWEL_REGEX = /[aeiouáàâãäéèêëíìîïóòôõöúùûü]/i;
+
 export function isFullName(text: string): boolean {
   const clean = text.trim();
   const words = clean.split(/\s+/);
@@ -198,6 +201,9 @@ export function isFullName(text: string): boolean {
   if (clean.includes('?') || clean.length > 60) return false;
   if (isGreeting(clean)) return false;
   if (!/^[A-Za-zÀ-ÖØ-öø-ÿ\s]+$/.test(clean)) return false;
+  // Semente de plausibilidade: cada palavra precisa ter ao menos 2 letras e
+  // uma vogal ("xyz", "kkkkk" e afins deixam de virar "nome" na consulta).
+  if (words.some((w) => w.length < 2 || !VOWEL_REGEX.test(w))) return false;
   const lowerWords = words.map((w) => w.toLowerCase());
   if (lowerWords.some((w) => NON_NAME_WORDS.has(w))) return false;
   return true;

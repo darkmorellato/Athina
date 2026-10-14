@@ -55,6 +55,23 @@ O único atendimento automático é o roteiro do `workflow athina.excalidraw`, i
 
 Fluxo: coleta nome + CPF/IMEI → consulta o contrato no Paymobi → menu (1 pagar boleto/PIX, 2 verificar saldo, 3 celular bloqueado por comprovante, 4 falar com atendente). Transferências notificam os contatos de `HUMAN_HANDOFF_CONTACTS`. O único ponto com IA é a leitura opcional do comprovante: o OCR hospedado da NVIDIA (`AGENT_VISION_MODEL`, padrão `nvidia/nemotron-ocr-v2`) lê o texto e uma regra fixa decide PIX vs. boleto. Não há LLM decidindo respostas.
 
+### Motor conversacional (linguagem natural)
+
+Sobre o roteiro determinístico há um motor NLU híbrido (`backend/src/services/DialogueNluService.ts`) com *fast-path* por regras (custo zero) e sem LLM no caminho de texto:
+
+- **Slot jumping**: nome + CPF/CNPJ/IMEI + intenção na mesma mensagem pulam direto para a etapa certa (ex.: *"meu nome é Maria Silva, CPF 529.982.247-25, quero meu boleto"*).
+- **Linguagem natural nos menus**: *"sim, pode mandar"*, *"está errado"*, *"voltar"*, *"meu celular bloqueou mas já paguei no pix"*.
+- **Fallbacks progressivos**: após 3 respostas incompreensíveis (em qualquer etapa) ou sentimento hostil, o cliente é transferido automaticamente para um atendente humano.
+- **Debounce**: mensagens picadas do mesmo cliente (janela de 1.8s) viram um único turno lógico.
+- **Validação de documento**: CPF/CNPJ (Módulo 11) e IMEI (Luhn) são conferidos antes de consultar o Paymobi; dígito errado pede correção na hora (sem consulta).
+
+**Notas de voz (opcional)**: com `STT_MODEL` definido, áudios enviados pelo cliente são transcritos (`/audio/transcriptions`) e alimentam o mesmo diálogo.
+
+### Webhook de confirmação de pagamento (opcional)
+
+Com `PAYMENT_WEBHOOK_SECRET` definido, `POST /webhooks/payment` aceita a confirmação de pagamento do provedor (Cel.cash/Paymobi): valida a assinatura **HMAC-SHA256 sobre os bytes brutos** (header `x-webhook-signature`), ignora replays do mesmo corpo (24h), limpa o estado do contato e envia ao cliente a confirmação do pagamento com a orientação de desbloqueio. Sem o segredo, o endpoint responde 503.
+
+
 ## 🔒 Segurança do painel
 
 - O handshake do Socket.IO é autenticado: com `ADMIN_SECRET` definido no `backend/.env`, o painel precisa do token para conectar — defina uma vez no console do navegador: `localStorage.setItem('athina_admin_token', '<ADMIN_SECRET>')`. Sem `ADMIN_SECRET`, apenas conexões da própria máquina (loopback) são aceitas.

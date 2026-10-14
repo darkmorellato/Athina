@@ -79,6 +79,14 @@ describe('shared/validators — validação algorítmica e extração segura', (
     expect(extractPlausibleDocument('11987654321 meu cpf é 52998224725')?.digits).toBe('52998224725');
   });
 
+  it('rejeita entradas que não parecem nome próprio (semente de plausibilidade)', () => {
+    expect(isFullName('blablabla xyz')).toBe(false);
+    expect(isFullName('kkkkk jjjjj')).toBe(false);
+    expect(isFullName('Maria Silva')).toBe(true);
+    expect(isFullName('João Pedro de Souza')).toBe(true);
+    expect(isFullName('Ana Paula')).toBe(true);
+  });
+
   it('compartilha sanitizeForWhatsApp, isGreeting e isFullName entre front e back', () => {
     expect(sanitizeForWhatsApp('**Olá** CPF: 123.456.789-01')).toBe('*Olá* CPF: ***.456.789-**');
     expect(isGreeting('Bom dia!')).toBe(true);

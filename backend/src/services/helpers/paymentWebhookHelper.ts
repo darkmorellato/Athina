@@ -56,7 +56,7 @@ const processedWebhookHashes = new LRUCache<string, true>({ max: 5000, ttl: 24 *
  */
 export async function handleWebhookRequest(
   req: WebhookRequest,
-  deps?: { sendMessage?: (to: string, text: string) => Promise<void> }
+  deps?: PaymentWebhookDeps
 ): Promise<WebhookProcessResult> {
   const { rawBody, body, signatureHeader, secret } = req;
 
@@ -118,15 +118,22 @@ function resolveTargetJid(payload: PaymentWebhookPayload): string | null {
   }
   const digits = (payload.phone ?? payload.contactId ?? '').replace(/\D/g, '');
   if (digits.length < 10 || digits.length > 15) return null;
-  const withCountry = digits.length <= 11 && !digits.startsWith('55') ? `55${digits}` : digits;
+  // 10–11 dígitos = número nacional SEM DDI (mesmo começando com "55", que pode
+  // ser o DDD 55/RS) → prefixa 55. 12+ dígitos já vêm com DDI.
+  const withCountry = digits.length <= 11 ? `55${digits}` : digits;
   return `${withCountry}@c.us`;
+}
+
+/** Dependências injetáveis do processamento de webhook (testes / desacoplamento). */
+export interface PaymentWebhookDeps {
+  sendMessage?: (to: string, text: string) => Promise<void>;
+  /** Contabiliza a resolução automática; só é chamada após o envio bem-sucedido. */
+  incrementAutoResolved?: () => Promise<void>;
 }
 
 export async function processPaymentWebhook(
   rawPayload: unknown,
-  deps?: {
-    sendMessage?: (to: string, text: string) => Promise<void>;
-  }
+  deps?: PaymentWebhookDeps
 ): Promise<{ notified: boolean; contactId: string | null }> {
   const parsed = paymentWebhookPayloadSchema.safeParse(rawPayload);
   if (!parsed.success) {
@@ -140,7 +147,6 @@ export async function processPaymentWebhook(
   }
 
   await chatStateService.resetFlowState(targetJid);
-  await analyticsService.increment('autoResolved');
 
   const firstName = data.customerName?.trim().split(/\s+/)[0] || 'cliente';
   const parcelaInfo = data.installmentNumber ? ` da parcela ${data.installmentNumber}` : '';
@@ -162,9 +168,14 @@ export async function processPaymentWebhook(
       }
       await client.sendMessage(to, body);
     });
+  const incrementResolved =
+    deps?.incrementAutoResolved ?? (() => analyticsService.increment('autoResolved'));
 
   try {
     await sendFn(targetJid, text);
+    // Só conta como resolvido se o cliente REALMENTE foi notificado — um envio
+    // falho não é resolução automática (inflaria a métrica).
+    await incrementResolved();
     logger.info({ contactId: targetJid }, '[PaymentWebhook] Confirmação proativa enviada ao cliente');
     return { notified: true, contactId: targetJid };
   } catch (err) {

@@ -278,6 +278,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   try {
     await whatsAppService.destroy();
+    await athinaFlowService.dispose();
     await closeSharedBrowser();
   } catch (err) {
     logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Error during shutdown cleanup');

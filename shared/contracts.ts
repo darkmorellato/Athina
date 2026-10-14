@@ -193,10 +193,13 @@ export const chatFlowDataSchema = z
     recentTurns: z.array(conversationTurnSchema).max(10).optional(),
     /** Timestamp (ms) de quando os dados do Paymobi foram consultados */
     contractFetchedAt: z.number().optional(),
-    /** Timestamp (ms) até quando o atendente humano assumiu a conversa */
-    humanTakeoverUntil: z.number().optional(),
+    /** Timestamp (ms) até quando o atendente humano assumiu a conversa. `null` = liberação explícita. */
+    humanTakeoverUntil: z.number().nullable().optional(),
   })
   .nullable();
+
+/** Dados do roteiro e contexto conversacional (não-nulo). */
+export type ChatFlowData = NonNullable<z.infer<typeof chatFlowDataSchema>>;
 
 export const chatStateSchema = z.object({
   stage: chatStageSchema,
@@ -206,6 +209,9 @@ export const chatStateSchema = z.object({
   collect: collectDataSchema.optional(),
   /** Campos do roteiro e contexto conversacional */
   flow: chatFlowDataSchema.optional(),
+  /** Timestamps do estado (preenchidos pelo servidor; opcionais no payload do painel). */
+  createdAt: z.number().optional(),
+  updatedAt: z.number().optional(),
 });
 export type ChatState = z.infer<typeof chatStateSchema>;
 
