@@ -48,6 +48,8 @@ const envSchema = z.object({
   // análise automática fica desativada e o comprovante só é encaminhado ao
   // atendente humano, sem classificação.
   AGENT_VISION_MODEL: z.string().optional(),
+  // Modelo de visão (chat) usado quando o OCR não identifica o comprovante.
+  RECEIPT_VISION_MODEL: z.string().default('meta/llama-3.2-90b-vision-instruct'),
   // Contatos humanos (WhatsApp) que recebem a transferência de atendimento —
   // dígitos com DDI+DDD separados por vírgula, ex.: "5519989354849,5519990151809".
   HUMAN_HANDOFF_CONTACTS: z.string().optional(),
@@ -91,6 +93,7 @@ const configObj = {
   aiModel: env.AI_MODEL ?? null,
   agentAutoReply: env.AGENT_AUTOREPLY,
   agentVisionModel: env.AGENT_VISION_MODEL ?? 'nvidia/nemotron-ocr-v2',
+  receiptVisionModel: env.RECEIPT_VISION_MODEL,
   /** Dígitos de contato (sem @c.us) dos atendentes humanos — vazio se não configurado. */
   humanHandoffContacts: (env.HUMAN_HANDOFF_CONTACTS ?? '')
     .split(',')

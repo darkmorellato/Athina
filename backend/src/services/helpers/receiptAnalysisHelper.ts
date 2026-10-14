@@ -1,34 +1,33 @@
 /**
- * @fileoverview Download e classificação (PIX vs. boleto) de comprovante de
+ * @fileoverview Leitura e classificação (PIX vs. boleto) de comprovante de
  * pagamento recebido no fluxo de "celular bloqueado".
  *
- * Usa o NIM de OCR hospedado da NVIDIA (Nemotron OCR v2 — sucessor do NeMo
- * Retriever OCR) em vez de pedir a um modelo de chat para "olhar" a imagem:
- * é um modelo dedicado de leitura de texto, então a extração é mais confiável
- * do que pedir a um VLM genérico para classificar diretamente, e a
- * classificação final (PIX vs. boleto) fica como regra determinística sobre
- * o texto extraído — coerente com o resto do roteiro (AthinaFlowService), que
- * não deixa um LLM decidir a resposta.
+ * Pipeline:
+ *  1. PDF → converte a primeira página em PNG (pdftoppm).
+ *  2. OCR hospedado da NVIDIA (nemotron-ocr-v2) lê o texto da imagem.
+ *  3. Regra fixa sobre o texto decide PIX ou BOLETO.
+ *  4. Se o texto não bastar (foto ruim, layout estranho), um modelo de visão
+ *     da NVIDIA (llama-3.2-90b-vision-instruct) classifica a imagem.
  *
- * Endpoint confirmado manualmente (ver NVIDIA RAG Blueprint docs):
- * `https://ai.api.nvidia.com/v1/cv/<modelo>` — NÃO é o endpoint OpenAI-
- * compatible de chat/completions usado pelo resto do backend.
- *
- * Sem `AGENT_VISION_MODEL`/chave de API configurada, ou para PDFs (o OCR só
- * aceita image_url — png/jpeg), a análise automática fica desativada e o
- * comprovante segue direto para o atendente humano, sem classificação.
+ * Sem chave de API, ou se tudo falhar, retorna INDEFINIDO e o comprovante
+ * segue para o atendente humano.
  */
+import { execFile } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import axios from 'axios';
 import config from '../../config/index.js';
 import logger from '../../utils/logger.js';
 
-/** Teto de tamanho da mídia baixada (base64) — mesmo critério do broadcast em
- *  tempo real (`whatsappMessageHelper.ts`): evita carregar um arquivo gigante
- *  na memória do processo. */
+const execFileAsync = promisify(execFile);
+
+/** Teto de tamanho da mídia baixada (base64) — evita carregar arquivo gigante. */
 const MAX_MEDIA_BASE64_CHARS = 5 * 1024 * 1024;
 
-/** Base do endpoint de Computer Vision hospedado da NVIDIA (NIM). */
 const NVIDIA_CV_ENDPOINT = 'https://ai.api.nvidia.com/v1/cv';
+const NVIDIA_CHAT_ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 export type ReceiptKind = 'PIX' | 'BOLETO' | 'INDEFINIDO';
 
@@ -46,6 +45,10 @@ interface NvidiaOcrResponse {
   data?: Array<{
     text_detections?: Array<{ text_prediction?: { text?: string; confidence?: number } }>;
   }>;
+}
+
+interface ChatResponse {
+  choices?: Array<{ message?: { content?: string | null } }>;
 }
 
 /** Baixa a mídia de uma mensagem do WhatsApp, respeitando o teto de tamanho. */
@@ -68,59 +71,132 @@ export async function downloadMediaBounded(msg: DownloadableMessage): Promise<Do
   }
 }
 
-/** Chama o OCR hospedado da NVIDIA e devolve o texto lido na imagem (ou null). */
-async function extractReceiptText(media: DownloadedMedia): Promise<string | null> {
-  const apiKey = config.aiApiKey;
-  const model = config.agentVisionModel;
-  if (!apiKey || !model) return null;
+const BOLETO_PATTERN =
+  /\b(boleto|c[oó]digo de barras|linha digit[aá]vel|ficha de compensa[cç][aã]o|pagamento de t[ií]tulos?)\b/i;
+const PIX_PATTERN = /\bpix\b/i;
 
+/**
+ * Regra fixa sobre o texto do comprovante. Boleto vem antes: comprovantes de
+ * boleto costumam citar "pix" no rodapé (aviso genérico do banco).
+ */
+export function classifyReceiptText(text: string): ReceiptKind {
+  if (BOLETO_PATTERN.test(text)) return 'BOLETO';
+  if (PIX_PATTERN.test(text)) return 'PIX';
+  return 'INDEFINIDO';
+}
+
+/** Lê o texto da imagem com o OCR da NVIDIA. Retorna null se a chamada falhar. */
+async function ocrImage(imageBase64: string, mimetype: string): Promise<string | null> {
+  const apiKey = config.aiApiKey;
+  if (!apiKey) return null;
   try {
     const response = await axios.post<NvidiaOcrResponse>(
-      `${NVIDIA_CV_ENDPOINT}/${model}`,
-      { input: [{ type: 'image_url', url: `data:${media.mimetype};base64,${media.base64}` }] },
+      `${NVIDIA_CV_ENDPOINT}/${config.agentVisionModel}`,
+      { input: [{ type: 'image_url', url: `data:${mimetype};base64,${imageBase64}` }] },
       {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         timeout: 20_000,
       }
     );
     const detections = response.data?.data?.[0]?.text_detections ?? [];
-    return detections
-      .map((d) => d.text_prediction?.text ?? '')
-      .join(' ')
-      .trim();
+    return detections.map((d) => d.text_prediction?.text ?? '').join(' ').trim();
   } catch (err) {
-    const status = axios.isAxiosError(err) ? err.response?.status : undefined;
-    const hint = status === 403 ? ' — confira NVIDIA_API_KEY e o acesso ao modelo em build.nvidia.com' : '';
     logger.warn(
-      { error: err instanceof Error ? err.message : String(err), status },
-      `[ReceiptAnalysis] Falha ao chamar o OCR da NVIDIA — seguindo como INDEFINIDO${hint}`
+      { error: err instanceof Error ? err.message : String(err), status: axios.isAxiosError(err) ? err.response?.status : undefined },
+      '[ReceiptAnalysis] OCR da NVIDIA falhou'
     );
     return null;
   }
 }
 
-const PIX_PATTERN = /\bpix\b/i;
-const BOLETO_PATTERN = /\b(boleto|c[oó]digo de barras|linha digit[aá]vel|ficha de compensa[cç][aã]o)\b/i;
+/** Classifica a imagem com o modelo de visão da NVIDIA (reserva do OCR). */
+async function visionClassify(imageBase64: string, mimetype: string): Promise<ReceiptKind> {
+  const apiKey = config.aiApiKey;
+  if (!apiKey) return 'INDEFINIDO';
+  try {
+    const response = await axios.post<ChatResponse>(
+      NVIDIA_CHAT_ENDPOINT,
+      {
+        model: config.receiptVisionModel,
+        temperature: 0,
+        max_tokens: 60,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  'Esta imagem é um comprovante de pagamento. Responda somente com uma palavra: ' +
+                  'PIX se for comprovante de transferência PIX, BOLETO se for comprovante de pagamento ' +
+                  'de boleto ou título (código de barras), ou INDEFINIDO se não der para saber.',
+              },
+              { type: 'image_url', image_url: { url: `data:${mimetype};base64,${imageBase64}` } },
+            ],
+          },
+        ],
+      },
+      {
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        timeout: 25_000,
+      }
+    );
+    const answer = (response.data?.choices?.[0]?.message?.content ?? '').toUpperCase();
+    if (/\bBOLETO\b/.test(answer)) return 'BOLETO';
+    if (/\bPIX\b/.test(answer)) return 'PIX';
+    return 'INDEFINIDO';
+  } catch (err) {
+    logger.warn(
+      { error: err instanceof Error ? err.message : String(err) },
+      '[ReceiptAnalysis] Modelo de visão falhou — seguindo como INDEFINIDO'
+    );
+    return 'INDEFINIDO';
+  }
+}
+
+/** Converte a primeira página de um PDF em PNG (base64). Retorna null se falhar. */
+async function pdfFirstPageToPng(pdfBase64: string): Promise<string | null> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'athina-receipt-'));
+  const pdfPath = path.join(dir, 'receipt.pdf');
+  const outPrefix = path.join(dir, 'page');
+  try {
+    await fs.writeFile(pdfPath, Buffer.from(pdfBase64, 'base64'));
+    await execFileAsync('pdftoppm', ['-png', '-r', '150', '-f', '1', '-l', '1', '-singlefile', pdfPath, outPrefix], {
+      timeout: 20_000,
+    });
+    const png = await fs.readFile(`${outPrefix}.png`);
+    return png.toString('base64');
+  } catch (err) {
+    logger.warn(
+      { error: err instanceof Error ? err.message : String(err) },
+      '[ReceiptAnalysis] Não consegui converter o PDF (pdftoppm)'
+    );
+    return null;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
 
 /**
- * Classifica o comprovante como PIX, BOLETO ou INDEFINIDO a partir do texto
- * lido pelo OCR da NVIDIA. Retorna INDEFINIDO sem chamar o modelo quando não
- * há chave/modelo configurado, a mídia não é imagem (ex.: PDF), ou o OCR não
- * lê nenhum termo reconhecível — nesses casos o comprovante só é encaminhado
- * ao atendente humano, sem classificação automática.
+ * Classifica o comprovante como PIX, BOLETO ou INDEFINIDO. PDFs são analisados
+ * pela primeira página. Sem chave de API, ou sem resposta confiável, o
+ * resultado é INDEFINIDO e o atendente humano decide.
  */
 export async function classifyReceipt(media: DownloadedMedia): Promise<ReceiptKind> {
-  if (!media.mimetype.startsWith('image/')) return 'INDEFINIDO';
+  let imageBase64: string | null = null;
+  let imageMime = media.mimetype;
 
-  const text = await extractReceiptText(media);
-  if (!text) return 'INDEFINIDO';
+  if (media.mimetype === 'application/pdf') {
+    imageBase64 = await pdfFirstPageToPng(media.base64);
+    imageMime = 'image/png';
+  } else if (media.mimetype.startsWith('image/')) {
+    imageBase64 = media.base64;
+  }
+  if (!imageBase64) return 'INDEFINIDO';
 
-  const isBoleto = BOLETO_PATTERN.test(text);
-  const isPix = PIX_PATTERN.test(text);
-  // Comprovantes de boleto costumam citar "pix" no rodapé (aviso genérico do
-  // banco) — o termo de boleto/código de barras é o mais específico, então
-  // decide primeiro.
-  if (isBoleto) return 'BOLETO';
-  if (isPix) return 'PIX';
-  return 'INDEFINIDO';
+  const text = await ocrImage(imageBase64, imageMime);
+  const fromText = text ? classifyReceiptText(text) : 'INDEFINIDO';
+  if (fromText !== 'INDEFINIDO') return fromText;
+
+  return visionClassify(imageBase64, imageMime);
 }

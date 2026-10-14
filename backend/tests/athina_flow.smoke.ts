@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { AthinaFlowService } from '../src/services/AthinaFlowService.js';
 import config from '../src/config/index.js';
 import type { PaymobiResult } from '../src/types/index.js';
+import { classifyReceiptText } from '../src/services/helpers/receiptAnalysisHelper.js';
 
 const mutableConfig = config as unknown as { agentAutoReply: boolean };
 const originalAutoReply = mutableConfig.agentAutoReply;
@@ -139,6 +140,17 @@ async function reachMultiConfirm(flow: ReturnType<typeof makeFlow>['flow'], cont
 }
 
 const scenarios: Scenario[] = [
+  {
+    name: 'comprovantes: regra de texto separa boleto (inclusive títulos) de PIX',
+    run: async () => {
+      assert.equal(classifyReceiptText('Comprovante de Pagamento de Títulos Código de barras 5099'), 'BOLETO');
+      assert.equal(classifyReceiptText('Linha digitável 23790.00000 60000'), 'BOLETO');
+      assert.equal(classifyReceiptText('Transferência PIX efetivada R$ 405,63'), 'PIX');
+      // boleto que cita PIX no rodapé continua sendo boleto
+      assert.equal(classifyReceiptText('Código de barras ... pague também via pix'), 'BOLETO');
+      assert.equal(classifyReceiptText('texto qualquer sem termos'), 'INDEFINIDO');
+    },
+  },
   {
     name: 'transferência em horário de expediente: sem aviso de fora do horário',
     run: async () => {
