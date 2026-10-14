@@ -96,6 +96,7 @@ function makeFlow(overrides?: {
   consultarPaymobi?: (query: string, clientName?: string) => Promise<PaymobiResult>;
   receiptKind?: 'PIX' | 'BOLETO' | 'INDEFINIDO';
   ready?: boolean;
+  now?: Date;
 }) {
   const sent: SentMessage[] = [];
   const notified: Notification[] = [];
@@ -117,6 +118,7 @@ function makeFlow(overrides?: {
     },
     isReady: () => overrides?.ready ?? true,
     replyDelayMs: () => 0,
+    now: () => overrides?.now ?? new Date('2026-10-12T13:00:00Z'),
   });
 
   return { flow, sent, notified, consulted };
@@ -129,7 +131,55 @@ function newContact(): string {
   return `55119${String(seq).padStart(8, '0')}@c.us`;
 }
 
+/** Fluxo até a confirmação de regularização (2+ parcelas em atraso). */
+async function reachMultiConfirm(flow: ReturnType<typeof makeFlow>['flow'], contact: string): Promise<void> {
+  await flow.handleIncomingMessage({ from: contact, body: 'Maria Silva', id: `${contact}-a` });
+  await flow.handleIncomingMessage({ from: contact, body: '12345678901', id: `${contact}-b` });
+  await flow.handleIncomingMessage({ from: contact, body: '1', id: `${contact}-c` });
+}
+
 const scenarios: Scenario[] = [
+  {
+    name: 'transferência em horário de expediente: sem aviso de fora do horário',
+    run: async () => {
+      const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundMultiAtraso(), now: new Date('2026-10-12T13:00:00Z') });
+      const contact = newContact();
+      await reachMultiConfirm(flow, contact);
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: `${contact}-d` });
+      assert.equal(notified.length, 1);
+      assert.ok(!sent.some((m) => /não estão presentes/.test(m.text)), 'não deve avisar fora do horário em dia útil às 10h');
+    },
+  },
+  {
+    name: 'transferência no domingo: cliente recebe o aviso de retorno no próximo expediente',
+    run: async () => {
+      const { flow, sent, notified } = makeFlow({ consultarPaymobi: async () => foundMultiAtraso(), now: new Date('2026-10-18T13:00:00Z') });
+      const contact = newContact();
+      await reachMultiConfirm(flow, contact);
+      await flow.handleIncomingMessage({ from: contact, body: '1', id: `${contact}-d` });
+      assert.equal(notified.length, 1, 'a transferência continua sendo enviada aos atendentes');
+      const notice = sent[sent.length - 1];
+      assert.match(notice.text, /não estão presentes/);
+      assert.match(notice.text, /seg\. a sex\. das 8h às 20h/);
+      assert.match(notice.text, /assim que eles voltarem ao expediente/);
+    },
+  },
+  {
+    name: 'transferência no sábado à noite (19h) e sexta às 19h30 seguem a regra certa',
+    run: async () => {
+      const sat = makeFlow({ consultarPaymobi: async () => foundMultiAtraso(), now: new Date('2026-10-17T22:00:00Z') });
+      const c1 = newContact();
+      await reachMultiConfirm(sat.flow, c1);
+      await sat.flow.handleIncomingMessage({ from: c1, body: '1', id: `${c1}-d` });
+      assert.ok(sat.sent.some((m) => /não estão presentes/.test(m.text)), 'sábado 19h está fora do expediente');
+
+      const fri = makeFlow({ consultarPaymobi: async () => foundMultiAtraso(), now: new Date('2026-10-16T22:30:00Z') });
+      const c2 = newContact();
+      await reachMultiConfirm(fri.flow, c2);
+      await fri.flow.handleIncomingMessage({ from: c2, body: '1', id: `${c2}-d` });
+      assert.ok(!fri.sent.some((m) => /não estão presentes/.test(m.text)), 'sexta 19h30 ainda está no expediente');
+    },
+  },
   {
     name: 'ignora mensagens quando AGENT_AUTOREPLY está desligado',
     run: async () => {

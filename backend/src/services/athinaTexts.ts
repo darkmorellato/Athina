@@ -85,6 +85,16 @@ export const FLOW_TEXT_DEFS: readonly FlowTextDef[] = [
       'Ótimo! Vou te transferir para um especialista para ajudá-lo(a) a {motivo}. 🙂\n\nAguarde um momento que logo você será atendido(a).',
   },
   {
+    key: 'offHours',
+    stage: 'Atendente',
+    label: 'Fora do horário de atendimento (após transferir)',
+    placeholders: ['{horario}'],
+    defaultText:
+      '🕒 *Os especialistas não estão presentes no momento.*\n\n' +
+      'Horário de funcionamento: {horario}.\n\n' +
+      'Sua mensagem foi direcionada e, assim que eles voltarem ao expediente, você terá um retorno sobre o seu caso. 🙏',
+  },
+  {
     key: 'politeDecline',
     stage: 'Encerramento',
     label: 'Cliente não quer mais nada',

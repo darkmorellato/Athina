@@ -32,6 +32,7 @@ import { notifyHumanAgents } from './helpers/humanHandoffHelper.js';
 import type { PaymobiResult } from '../types/index.js';
 import * as msg from './athinaMessages.js';
 import { flowText, opts } from './athinaTexts.js';
+import { isWithinBusinessHours, BUSINESS_HOURS_LABEL } from '../utils/businessHours.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,8 @@ export interface AthinaFlowDeps {
   isReady: () => boolean;
   /** Atraso "humano" antes de cada resposta (ms) — injetável para testes (sem espera real). */
   replyDelayMs: () => number;
+  /** Relógio do atendimento — injetável para testar horário de expediente. */
+  now: () => Date;
 }
 
 const MAX_PROCESSED_IDS = 2000;
@@ -88,6 +91,7 @@ export class AthinaFlowService {
         deps?.isReady ??
         (() => whatsAppService.getClientState() === 'READY' && Boolean(whatsAppService.getClient())),
       replyDelayMs: deps?.replyDelayMs ?? humanDelayMs,
+      now: deps?.now ?? (() => new Date()),
     };
   }
 
@@ -435,7 +439,8 @@ export class AthinaFlowService {
     const flow = state.flow ?? {};
     if (choice === '1') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('regularizar suas parcelas em atraso'));
-      await this.deps.notifyHumans({
+      await this.handoffToHumans({
+        contactId,
         client: this.clientForHandoff(flow),
         reason: 'Regularização de múltiplas parcelas em atraso',
         details: `Cliente deseja regularizar pendências — ${flow.overdueCount ?? '2+'} parcelas em atraso.`,
@@ -535,7 +540,8 @@ export class AthinaFlowService {
     }
 
     await this.reply(contactId, msg.buildReceiptReceivedText(kind));
-    await this.deps.notifyHumans({
+    await this.handoffToHumans({
+      contactId,
       client: this.clientForHandoff(flow),
       reason: 'Comprovante de pagamento recebido (celular bloqueado)',
       details: `Comprovante analisado como: ${kind}. Método informado pelo cliente: ${flow.bloqueioMetodo ?? 'não informado'}.`,
@@ -562,7 +568,8 @@ export class AthinaFlowService {
     const flow = state.flow ?? {};
     if (choice === '1') {
       await this.reply(contactId, msg.buildTransferToSpecialistText('falar com nosso especialista'));
-      await this.deps.notifyHumans({
+      await this.handoffToHumans({
+        contactId,
         client: this.clientForHandoff(flow),
         reason: 'Falar com atendente',
         details: `Assunto informado pelo cliente: "${flow.humanTopic ?? ''}"`,
@@ -579,6 +586,18 @@ export class AthinaFlowService {
   }
 
   // ─── Helpers compartilhados ─────────────────────────────────────────────────
+
+  /**
+   * Transfere para os atendentes. Fora do expediente, o cliente também recebe
+   * o aviso de que o especialista retorna no próximo horário de atendimento.
+   */
+  private async handoffToHumans(payload: Parameters<AthinaFlowDeps['notifyHumans']>[0] & { contactId?: string }): Promise<void> {
+    const { contactId, ...handoff } = payload;
+    await this.deps.notifyHumans(handoff);
+    if (contactId && !isWithinBusinessHours(this.deps.now())) {
+      await this.reply(contactId, flowText('offHours').replace('{horario}', BUSINESS_HOURS_LABEL));
+    }
+  }
 
   private clientForHandoff(flow: ChatFlowData): { nome: string; cpf: string; imei: string } {
     return {
