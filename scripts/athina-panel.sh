@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Abre o painel da Athina em uma janela própria (sem barra de endereço).
+# Abre o painel da Athina no Zen (ou, se ausente, em janela de app do Chrome).
 # Sobe o frontend e o TTS se não estiverem rodando; o backend roda pelo systemd.
 set -u
 
@@ -32,6 +32,10 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
+if command -v zen-browser >/dev/null 2>&1; then
+  exec zen-browser --new-window "$PANEL_URL"
+fi
+
 BROWSER=""
 for candidate in google-chrome google-chrome-stable chromium chromium-browser brave-browser \
   "$HOME"/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome; do
@@ -40,7 +44,7 @@ for candidate in google-chrome google-chrome-stable chromium chromium-browser br
 done
 
 if [ -z "$BROWSER" ]; then
-  notify "Nenhum navegador Chrome/Chromium encontrado."
+  notify "Nenhum navegador encontrado (Zen, Chrome ou Chromium)."
   exit 1
 fi
 
