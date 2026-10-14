@@ -137,3 +137,18 @@ Smoke: `npx --prefix backend tsx tests/_tracing_smoke.ts` (não precisa de conta
 - **Retenção de dados (política de 90 dias):** o sistema guarda apenas o estado do atendimento em andamento (expira em 24h), totais agregados sem dados pessoais e a base de treinamento. Não guardamos comprovantes nem o histórico de conversas — o histórico fica no WhatsApp do operador. Números, CPF e IMEI não são gravados na base de aprendizado.
 - **Integração contínua:** `.github/workflows/ci.yml` roda typecheck, lint e testes (frontend e backend) a cada push.
 - **Atendentes humanos:** `HUMAN_HANDOFF_CONTACTS` lista os contatos que recebem as transferências. Se a notificação falhar, o erro aparece no log como `[HumanHandoff]`.
+
+## 🧪 Como testar
+
+```bash
+npm run typecheck && npm --prefix backend run typecheck   # tipos (frontend e backend)
+npm run lint                                              # lint (deve sair sem avisos)
+npm run test                                              # testes do painel (Vitest)
+npm --prefix backend test                                 # roteiro da Athina (banco em memória)
+```
+
+Os testes do roteiro (`backend/tests/athina_flow.smoke.ts`) não tocam o WhatsApp nem o Paymobi: usam dependências simuladas. Para testar de ponta a ponta, use um número de teste e siga os ramos do menu (`AGENT_AUTOREPLY=true`).
+
+## 🖥️ Atalho de desktop
+
+`scripts/athina-panel.sh` sobe o frontend e o TTS se estiverem parados, verifica o backend e abre o painel numa janela própria. O atalho fica em `deploy/athina-panel.desktop`; copie para `~/.local/share/applications/` e `~/Desktop/` para usá-lo pelo menu ou pela área de trabalho.

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Athina — Painel
+Comment=Abrir o painel de atendimento da Athina
+Exec=/home/dark/Codes/Agent-Athina/scripts/athina-panel.sh
+Terminal=false
+Categories=Office;
+StartupWMClass=athina
